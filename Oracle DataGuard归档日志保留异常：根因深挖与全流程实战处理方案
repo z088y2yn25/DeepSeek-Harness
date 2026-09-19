@@ -1,0 +1,302 @@
+Oracle DataGuard归档日志保留异常：根因深挖与全流程实战处理方案
+在Oracle DataGuard容灾架构的日常运维中，归档日志是主备库数据同步的核心纽带，更是数据库故障恢复、数据一致性保障的关键基石。正常场景下，主库归档日志完成传输、备库成功应用后，会依据预设规则自动清理，释放磁盘空间，形成“产生-传输-应用-清理”的良性循环。
+但不少DBA都会遇到这样的棘手问题：主库归档日志持续堆积、长期保留不自动删除，磁盘空间被快速挤占，轻则导致数据库日志切换卡顿、业务响应变慢，重则触发ORA-00257、ORA-16038等报错，直接阻断日志归档，造成业务停滞、备库同步断档，彻底失效容灾备份能力。
+这类归档日志保留异常并非单一故障导致，看似简单的日志堆积，背后隐藏着网络、参数配置、备库状态、备份策略、存储故障等多重隐患。本文结合多年一线运维实战案例，深度拆解异常核心根因，梳理从故障排查、紧急处置到彻底根治、预防优化的全流程方案，帮你彻底解决DG归档日志异常堆积难题。
+一、初识异常：归档日志保留异常的典型现象与危害
+很多运维人员容易陷入误区：认为“日志保留越多越安全”，实则无意义的日志堆积隐患极大。我们先明确DataGuard归档日志保留异常的核心定义：主库归档日志已成功传输至备库、备库完成日志应用，却未按策略自动清理，或日志未完成同步就被异常滞留、堆积，超出正常保留周期的异常状态。
+1. 典型异常现象
+- 主库归档目录日志文件持续新增，旧日志长期残留，磁盘使用率居高不下，甚至100%占满；
+- 数据库告警日志持续输出ORA-19815、ORA-19809空间告警，提示FRA快速恢复区容量耗尽；
+- 主库日志切换缓慢，频繁出现日志等待事件，核心业务交易卡顿、超时；
+- 备库同步进度滞后，出现日志GAP断档，主备数据一致性偏差持续扩大；
+- RMAN自动清理任务执行成功，但归档日志文件无删除效果，清理策略完全失效。
+2. 潜在业务危害
+轻微异常仅造成磁盘资源浪费，但若放任不管，会形成连锁故障：磁盘爆满直接导致主库无法完成日志归档，数据库暂停业务写入，引发全线业务瘫痪；同时堆积的日志会掩盖真实同步故障，一旦主库突发宕机，备库因日志缺失、同步滞后无法正常切换，容灾架构彻底失效，造成不可逆的数据丢失风险。
+二、深度溯源：归档日志保留异常的五大核心根因
+DG架构中归档日志的自动清理遵循严格逻辑：主库确认日志传输成功+备库确认日志应用完成+满足RMAN保留策略，三者缺一不可。任意环节异常，都会导致日志无法自动清理、异常保留。结合实战故障场景，核心根因可分为五类，覆盖99%的运维异常案例。
+1. 备库同步与应用异常（最常见根因）
+这是归档日志堆积的首要原因。DG架构中，主库不会主动删除未被备库确认应用的归档日志，以此保障同步容错性。一旦备库出现问题，主库日志会持续滞留堆积。
+具体细分场景包括：一是备库MRP应用进程停滞，备库因参数错误、数据文件损坏、只读模式异常等问题，导致日志应用进程中断，日志只传输不应用，主库日志无法满足清理条件；二是备库I/O性能瓶颈，备库存储读写缓慢，日志应用速度远低于主库日志生成速度，形成大量未应用日志堆积；三是日志传输GAP断档，网络波动导致部分归档日志传输丢失，后续日志无法连续应用，整体同步停滞。
+2. 网络传输链路不稳定
+主备库跨机房、跨网段部署时，网络问题极易引发日志保留异常。网络延迟过高、端口抖动、防火墙策略拦截、带宽拥堵等问题，会导致主库RFS进程传输超时、日志传输不完整。
+此时主库无法收到备库的传输确认回执，系统判定日志“未同步完成”，即便部分日志已传输成功，也不会执行自动清理，最终造成日志批量堆积。这类问题极具迷惑性，网络看似连通正常，但高频的日志数据包传输持续异常，长期积累引发故障。
+3. DG核心参数配置错误或失效
+参数配置是DG日志清理的规则核心，参数错误、缺失、失效，会直接导致清理逻辑瘫痪，是人为运维失误的高频问题。
+常见参数问题包括：一是归档目的地参数异常，log_archive_dest_n参数未配置正确的备库服务地址、状态为DEFERRED禁用状态，或未开启VALID验证模式，主库无法正常同步日志；二是日志确认模式配置不当，最大保护、最大可用模式下，同步确认参数不匹配，主库强制等待备库回执，导致日志滞留；三是FRA区域参数限制，db_recovery_file_dest_size容量设置过小，或未开启自动清理机制，空间阈值触发后日志无法自动回收。
+4. RMAN备份与清理策略冲突失效
+多数企业通过RMAN定时任务清理归档日志，但若策略配置不合理，会出现“清理任务执行成功，日志依旧保留”的异常现象。
+核心问题场景：一是保留策略过于宽松，RMAN配置的日志保留周期过长，远超业务需求，大量过期日志被强制保留；二是清理指令不规范，未添加有效删除条件，仅执行普通备份指令，未触发DELETE INPUT删除逻辑；三是备份记录异常，归档日志备份成功但控制文件、备份集记录损坏，RMAN判定日志“未备份”，拒绝自动清理；四是手动误操作干扰，运维人员手动删除归档日志文件，但未同步更新RMAN备份信息，导致日志状态错乱，后续自动清理失效。
+5. 存储介质与日志文件损坏
+存储层故障是容易被忽略的隐性根因。备库磁盘空间耗尽、存储坏块、文件系统异常等问题，会导致备库RFS进程接收归档日志时，生成逻辑正常、内部数据空洞的异常日志文件。
+这类损坏日志无法被MRP进程识别应用，同步链路陷入阻塞，主库对应日志无法清理，持续保留堆积。同时主库存储磁盘坏块、文件权限异常，也会导致归档日志写入异常、状态异常，无法参与自动清理。
+三、全流程排查：快速定位异常根因（实操步骤）
+面对归档日志保留异常，切忌直接暴力删除日志，极易引发主备数据不一致、恢复失败等严重问题。下面整理一套从简到繁、逐层定位的标准化排查流程，高效锁定故障根因。
+步骤1：核查数据库告警日志，抓取核心报错
+告警日志是故障第一线索，优先通过告警日志定位异常类型。执行以下命令查看实时告警信息：
+# 查看告警日志路径
+show parameter background_dump_dest;
+# 筛选归档、空间、同步相关报错
+grep -E "ORA-16038|ORA-00257|ORA-19815|ORA-19809|GAP" alert_*.log
+通过报错快速区分故障类型：出现ORA-19815/19809为FRA空间耗尽；ORA-16038为日志归档同步失败；提示GAP为日志断档缺失。
+步骤2：校验主备库日志同步状态
+确认主库归档日志传输、备库日志应用是否正常，排查同步链路断点。
+主库执行查询，查看归档日志同步状态：
+SELECT sequence#,status,dest_id FROM v$archived_log ORDER BY sequence#;
+若存在大量状态为ACTIVE、UNSENT的日志，说明日志未完成传输或未被备库确认应用，是堆积核心原因。
+备库执行查询，核查日志应用进度：
+# 查看备库MRP进程状态
+SELECT process,status FROM v$managed_standby;
+# 查看最新应用日志序号
+SELECT max(sequence#) FROM v$archived_log WHERE applied='YES';
+若MRP进程状态为WAIT、ERROR，或主备最新日志序号差距持续扩大，说明备库应用异常。
+步骤3：检查DG核心参数配置有效性
+核查归档同步、FRA容量、日志确认等关键参数，排除配置失效问题：
+# 查看归档目的地配置与状态
+show parameter log_archive_dest_2;
+show parameter log_archive_dest_state_2;
+# 查看FRA空间配置与使用情况
+SELECT * FROM v$recovery_file_dest;
+# 查看DG同步确认模式
+show parameter log_archive_config;
+重点确认备库归档目的地状态为ENABLE，无DEFERRED禁用标记，FRA剩余空间充足，同步参数匹配当前DG架构模式。
+步骤4：校验RMAN清理策略与日志备份状态
+排查RMAN保留策略是否生效、日志备份记录是否完整：
+# 查看RMAN默认保留策略
+RMAN> show retention policy;
+# 查看未被备份、可清理的归档日志
+RMAN> list archivelog backup;
+若存在大量已应用、已备份但未删除的日志，说明RMAN清理策略失效或备份记录异常；若日志未完成备份，系统会默认保留日志，禁止清理。
+步骤5：排查网络与存储底层故障
+排除上层配置问题后，核查底层链路与存储状态：测试主备库端口连通性、网络延迟，排查防火墙、安全组是否拦截DG同步端口；检查主备库磁盘使用率、文件系统状态，排查存储坏块、文件权限异常、磁盘空间耗尽等问题。
+四、分级处理：异常问题精准解决实操方案
+根据排查出的不同根因，对应采用紧急处置、常规修复、彻底优化三级处理方案，既快速解除故障，又杜绝反复异常。
+1. 紧急处置：磁盘爆满、业务阻塞应急方案
+若已出现磁盘100%占用、业务卡顿、归档停滞，优先快速释放空间、恢复业务，避免故障扩大。
+第一步，扩容FRA空间，临时解除空间限制：
+ALTER SYSTEM SET db_recovery_file_dest_size=50G SCOPE=BOTH;
+第二步，强制清理已确认备库应用完成的归档日志（严禁清理未同步、未应用日志）：
+# RMAN清理已备份、已应用的归档日志
+RMAN> DELETE ARCHIVELOG BACKED UP 1 TIMES TO DISK;
+# 强制清理过期日志（谨慎使用）
+RMAN> DELETE NOPROMPT FORCE ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-1';
+第三步，重启归档进程，恢复正常日志归档：
+ALTER SYSTEM SWITCH LOGFILE;
+2. 常规修复：针对性解决各类根因异常
+（1）备库同步、应用异常修复
+若MRP进程停滞，重启备库日志应用进程：
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+若存在日志GAP断档，手动同步缺失日志：从主库拷贝缺失序号的归档日志至备库归档目录，执行日志注册，自动补全同步链路：
+ALTER DATABASE REGISTER LOGFILE '/u01/oracle/arch/xxx.log';
+若备库I/O缓慢，优化存储读写性能，清理备库磁盘冗余文件，保障日志应用效率。
+（2）网络传输异常修复
+梳理主备库网络链路，放行DG同步专属端口，优化防火墙策略，关闭端口拦截规则；调整网络带宽，解决链路拥堵、延迟过高问题；配置网络心跳检测，避免临时网络抖动导致的传输中断。网络恢复后，等待主库自动重传缺失日志，完成同步闭环。
+（3）DG参数异常修复
+修正错误归档参数，启用备库归档目的地：
+# 启用备库归档同步链路
+ALTER SYSTEM SET log_archive_dest_state_2=ENABLE SCOPE=BOTH;
+# 重置异常DG配置参数
+ALTER SYSTEM RESET log_archive_config SCOPE=BOTH;
+根据业务架构调整DG保护模式与日志确认策略，保障同步效率与安全性平衡，避免参数不匹配导致的日志滞留。
+（4）RMAN清理策略修复
+优化RMAN保留策略，适配DG同步规则，设置合理清理周期：
+# 设置7天日志保留策略
+RMAN> CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 7 DAYS;
+# 备份归档日志并自动清理已同步文件
+RMAN> BACKUP ARCHIVELOG ALL DELETE INPUT;
+修复异常备份记录，同步更新控制文件信息，消除“假未备份”状态，保障自动清理任务正常执行。同时规范运维操作，禁止手动直接删除归档日志，如需清理必须通过RMAN指令执行。
+（5）存储与损坏日志修复
+清理备库无效冗余文件、释放磁盘空间，修复存储坏块与文件系统异常；对损坏、空洞日志文件，手动删除后重新同步完整日志，重建正常同步链路，解决日志应用阻塞问题。
+3. 彻底根治：常态化优化规避异常复发
+临时修复只能解决当下故障，想要彻底杜绝归档日志保留异常，需建立标准化运维机制：
+- 优化自动清理机制：结合业务RTO、RPO需求，配置合理的RMAN保留策略，搭建定时自动备份+清理任务，实现日志全生命周期自动化管理；
+- 完善监控告警体系：监控主库归档磁盘使用率、日志堆积数量、主备日志同步差值、MRP/RFS进程状态，阈值触发即时告警，提前预判隐患；
+- 规范运维操作流程：禁止手动操作系统级归档日志文件，所有日志清理、备份统一通过RMAN执行；变更DG参数、网络策略后，必须校验日志同步状态；
+- 定期巡检优化：每日巡检主备库同步状态、FRA空间使用率、日志应用进度，每周清理无效备份记录、优化存储性能，提前规避链路、存储、参数隐患。
+五、运维避坑：高频失误案例总结
+结合大量实战故障，总结3个最易踩坑的运维误区，帮助大家规避风险：
+1. 暴力删除未同步日志：很多新手遇到磁盘爆满，直接在操作系统层面删除归档日志，导致RMAN记录错乱、主备同步断档，后续无法自动恢复同步，甚至引发数据不一致；
+2. 过度放宽日志保留策略：为规避日志误删风险，设置超长保留周期，导致磁盘长期高负载，积累大量无效日志，埋下业务阻塞隐患；
+3. 只看日志堆积不查根因：每次异常仅清理日志，不排查同步、网络、参数底层问题，导致故障反复复发，长期影响容灾架构稳定性。
+六、总结
+Oracle DataGuard归档日志保留异常，本质是日志产生、传输、应用、清理全链路的协同故障，并非简单的磁盘空间问题。看似微小的日志堆积，背后关乎容灾架构可用性、业务连续性与数据安全性。
+处理这类异常的核心逻辑是：先稳业务、再查根因、精准修复、长效优化。拒绝盲目清理、暴力处置，通过标准化排查流程锁定问题根源，针对性修复同步、网络、参数、备份、存储各类隐患，同时搭建常态化监控与运维机制，从根本上杜绝归档日志异常堆积，保障DataGuard容灾架构稳定、高效运行，为核心业务数据安全筑牢防线。
+
+
+
+
+
+https://pastebin.com/q8EBxZZh
+https://pastebin.com/F7tjadMh
+https://pastebin.com/c0qFYR5L
+https://pastebin.com/KSc0hJJD
+https://pastebin.com/4Mv7qhfc
+https://pastebin.com/LD2h94G9
+https://pastebin.com/9V1gtueJ
+https://pastebin.com/4Vex9Ms9
+https://pastebin.com/wrZtiJ6e
+https://pastebin.com/YDrqFXRf
+https://pastebin.com/DqerVVNy
+https://pastebin.com/bebH8B3g
+https://pastebin.com/3mWYn87D
+https://pastebin.com/NMWgM4rN
+https://pastebin.com/FiQwEnC1
+https://pastebin.com/jAYq16vr
+https://pastebin.com/Ydu7W4JZ
+https://pastebin.com/95PXaXxX
+https://pastebin.com/PmqkLksG
+https://pastebin.com/9036zHVY
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4923
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4924
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4925
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4926
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4927
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4928
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4929
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4930
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4931
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4932
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4933
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4934
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4935
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4936
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4937
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4938
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4939
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4940
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4941
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4942
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4943
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4944
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4945
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4946
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4947
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4948
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4949
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4950
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4951
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4952
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4953
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4954
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4955
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4956
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4957
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4958
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4959
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4960
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4961
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4962
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4963
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4964
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4965
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4966
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4967
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4968
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4969
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4970
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4971
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4972
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4973
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4974
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4975
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4976
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4977
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4978
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4978
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4978
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4979
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4980
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4981
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4982
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4983
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4984
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4985
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4986
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4987
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4988
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4989
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4990
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4991
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4992
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4993
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4994
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4995
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4996
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4997
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4998
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=4999
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5000
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5001
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5002
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5003
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5004
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5005
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5006
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5007
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5008
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5009
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5010
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5011
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5012
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5013
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5014
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5015
+https://bbs.bztdxxl.com/home.php?mod=space&uid=43849&do=album&id=5016
+https://www.huchihuchi.com/blog-350089-3887.html
+https://www.huchihuchi.com/blog-350089-3888.html
+https://www.huchihuchi.com/blog-350089-3889.html
+https://www.huchihuchi.com/blog-350089-3890.html
+https://www.huchihuchi.com/blog-350089-3891.html
+https://www.huchihuchi.com/blog-350089-3892.html
+https://www.huchihuchi.com/blog-350089-3893.html
+https://www.huchihuchi.com/blog-350089-3894.html
+https://www.huchihuchi.com/blog-350089-3895.html
+https://www.huchihuchi.com/blog-350089-3896.html
+https://www.huchihuchi.com/blog-350089-3897.html
+https://www.huchihuchi.com/blog-350089-3898.html
+https://www.huchihuchi.com/blog-350089-3899.html
+https://www.huchihuchi.com/blog-350089-3900.html
+https://www.huchihuchi.com/blog-350089-3901.html
+https://www.huchihuchi.com/blog-350089-3902.html
+https://www.huchihuchi.com/blog-350089-3903.html
+https://www.huchihuchi.com/blog-350089-3904.html
+https://www.huchihuchi.com/blog-350089-3905.html
+https://www.huchihuchi.com/blog-350089-3906.html
+https://www.huchihuchi.com/blog-350089-3907.html
+https://www.huchihuchi.com/blog-350089-3908.html
+https://www.huchihuchi.com/blog-350089-3909.html
+https://www.huchihuchi.com/blog-350089-3910.html
+https://www.huchihuchi.com/blog-350089-3911.html
+https://www.huchihuchi.com/blog-350089-3912.html
+https://www.huchihuchi.com/blog-350089-3913.html
+https://www.huchihuchi.com/blog-350089-3914.html
+https://www.huchihuchi.com/blog-350089-3915.html
+https://www.huchihuchi.com/blog-350089-3916.html
+https://www.huchihuchi.com/blog-350089-3917.html
+https://www.huchihuchi.com/blog-350089-3918.html
+https://www.huchihuchi.com/blog-350089-3919.html
+https://www.huchihuchi.com/blog-350089-3920.html
+https://www.huchihuchi.com/blog-350089-3921.html
+https://www.huchihuchi.com/blog-350089-3922.html
+https://www.huchihuchi.com/blog-350089-3923.html
+https://www.huchihuchi.com/blog-350089-3924.html
+https://www.huchihuchi.com/blog-350089-3925.html
+https://www.huchihuchi.com/blog-350089-3926.html
+https://www.huchihuchi.com/blog-350089-3926.html
+https://www.huchihuchi.com/blog-350089-3927.html
+https://www.huchihuchi.com/blog-350089-3928.html
+https://www.huchihuchi.com/blog-350089-3929.html
+https://www.huchihuchi.com/blog-350089-3930.html
+https://www.huchihuchi.com/blog-350089-3931.html
+https://www.huchihuchi.com/blog-350089-3932.html
+https://www.huchihuchi.com/blog-350089-3933.html
+https://www.huchihuchi.com/blog-350089-3934.html
+https://www.huchihuchi.com/blog-350089-3935.html
+https://www.huchihuchi.com/blog-350089-3936.html
+https://www.huchihuchi.com/blog-350089-3937.html
+https://www.huchihuchi.com/blog-350089-3938.html
+
+
+
+
+
