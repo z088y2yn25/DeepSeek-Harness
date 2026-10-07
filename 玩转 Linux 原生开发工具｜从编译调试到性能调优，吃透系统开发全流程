@@ -1,0 +1,295 @@
+Linux 强大的开发能力，很大一部分来源于系统自带的一整套原生工具链，无需额外安装复杂第三方套件，依靠系统内置程序，就能完成代码编译、错误排查、程序追踪、性能瓶颈定位整套开发工作。很多开发者只熟悉 gcc 编译代码，gdb 断点调试，却忽略了这套工具箱里还有大量实用利器，用好它们，可以大幅降低系统级开发、C/C++ 程序排错的成本。
+
+## 编译构建：gcc、make，程序的诞生起点
+
+gcc 作为 Linux 最核心的编译器，不只是简单把源码转为可执行文件。通过不同编译参数，可以开启警告检测、添加调试符号、优化程序运行效率，也能完成静态库、动态库的生成工作。
+仅仅单文件编译远远不够，面对多文件大型项目，就轮到 make 登场。借助 Makefile 组织编译规则，自动化处理文件依赖，规避重复编译，是原生环境下项目构建的基础。没有 IDE 的加持，依靠 gcc+make，就可以完成绝大多数底层程序的构建工作。
+
+> 
+> 小提示：编译时添加 `-g` 参数，生成调试符号文件，后续 gdb 调试才能看到源码行号，是调试前必不可少的操作。
+
+## 排错调试：gdb，直面程序的崩溃现场
+
+程序段错误、内存越界、异常退出，是系统开发中高频遇到的难题，gdb 就是原生环境下的排错核心。
+它支持断点设置、单步执行、查看变量、打印堆栈，程序崩溃之后，还可以抓取 core 转储文件，事后复现崩溃现场。很多新手仅会简单 run 运行程序，其实掌握查看调用栈、观察内存、条件断点，就可以定位绝大多数程序逻辑错误与内存异常。
+
+但调试不等于解决全部问题，很多隐藏问题 gdb 很难直接捕捉，这就需要其他工具做补充。
+
+## 运行时观测：捕捉程序隐藏问题
+
+### strace
+
+追踪进程全部系统调用，程序打开了什么文件、读取写入数据、发起网络调用、调用失败返回值全部一览无余。程序莫名卡死、文件读取失败、权限异常，不需要修改源码，strace 直接看程序和内核交互的全过程，快速定位根源。
+
+### ldd
+
+快速查看可执行程序依赖哪些动态库，解决 “找不到共享库” 这类运行报错，确认库版本是否匹配，排查动态链接异常。
+
+## 性能调优：找出程序慢在哪里
+
+代码编译完成能正常运行，不代表性能达标。CPU 占用过高、内存泄漏、IO 阻塞，这些性能问题需要专用工具来挖掘。
+
+### top / htop
+
+宏观观测系统资源，查看进程 CPU、内存占用，快速发现哪个进程异常消耗资源。
+
+### valgrind
+
+内存检测神器，重点排查内存泄漏、野指针、重复释放内存。很多程序短期运行正常，长时间运行内存持续上涨，valgrind 可以精准定位泄漏的代码位置。
+
+### perf
+
+Linux 内核自带性能分析工具，深度剖析 CPU 热点、函数调用耗时，定位哪些函数占用大量 CPU 时间，是高性能系统开发调优的王牌工具。
+
+## 工具组合实战思路
+
+完整的原生开发流程可以总结为：
+
+1. gcc + make 完成项目编译构建，开启调试符号；
+2. 程序崩溃用 gdb 配合 core 文件分析崩溃堆栈；
+3. 逻辑异常、系统调用报错使用 strace 追踪行为；
+4. 内存异常交给 valgrind 检测；
+5. 性能不达标，top 初步观察，perf 深挖热点做调优。
+
+整套工具全部随 Linux 系统自带，不需要复杂部署，掌握这套工具链，就算脱离图形化 IDE，也可以从容做系统层面开发与排错，真正读懂程序在 Linux 内核之上是如何运行的。
+
+---
+
+如果你需要，我可以帮你：
+
+1. 把本文精简成公众号短版；
+2. 再生成 2‑3 个同主题备选标题；
+3. 补充一份常用命令速查表。
+
+今天 03:16
+
+Linux 自带开发工具，撬动系统开发的硬核利器
+
+# Linux 自带开发工具，撬动系统开发的硬核利器
+
+做 Linux 系统开发，未必一定要依赖重型 IDE 与第三方软件包。系统出厂就预装了一整套开发工具集，编译、调试、追踪、性能分析一应俱全。熟练用好这些原生利器，即便只有命令行环境，也能搞定底层程序开发、故障排查、性能优化，这也是高阶开发人员必备的底层能力。
+
+很多初学者写代码只知道 gcc 编译，遇到段错误只会盲目改代码，程序跑慢了也不知道从哪里下手。实际上 Linux 工具箱远不止编译器，每一款工具都瞄准开发中的一类痛点，组合起来就能构建完整的命令行开发闭环。
+
+## 编译构建：程序从源码到可执行文件
+
+**gcc/g++**
+GNU 编译器套件，C/C++ 开发的根基。不只是简单编译源码，通过编译选项可以开启告警检查、插入调试符号、做代码优化，还能生成静态库、动态链接库。加上`‑Wall`可以捕捉很多隐藏代码隐患，`‑g`参数生成调试信息，为后续调试打下基础。
+
+**make + Makefile**
+面对多文件大型项目，手动敲 gcc 命令效率极低。make 读取 Makefile 定义的编译规则，自动处理文件依赖关系，只重新编译改动文件，大幅提升构建效率。很多开源项目原生就依靠 make 完成编译安装，吃透它，才能读懂开源项目构建逻辑。
+
+## 故障调试：直面崩溃与异常
+
+**gdb**
+大名鼎鼎的程序调试器。段错误、非法内存访问、程序异常退出，gdb 可以设置断点、单步跟踪、打印变量、回溯调用堆栈。配合 core dump 崩溃转储文件，程序崩溃之后，还能事后还原现场，复现偶现的 bug。
+
+> 
+> 注意：程序编译必须带`‑g`调试符号，gdb 才能映射到源码行号，否则只能看到汇编指令。
+
+## 行为追踪：看不见的程序行为一目了然
+
+**strace**
+跟踪进程所有系统调用。程序打开哪些文件、读写数据、访问网络、调用返回的错误码全部输出。程序莫名卡死、文件读取失败、权限报错，不用修改一行源码，就能看清用户态程序和内核交互的全过程，快速定位诡异问题。
+
+**ldd**
+查看程序依赖的动态共享库。运行程序报找不到库时，ldd 可以快速校验依赖库是否存在、版本是否匹配，解决动态链接相关报错。
+
+## 内存与性能：深挖程序瓶颈
+
+**valgrind**
+内存问题检测王牌工具，专门定位内存泄漏、野指针访问、重复释放。有些 bug 短时间运行看不出来，长时间运行内存持续暴涨，valgrind 可以直接定位到发生内存异常的代码行。
+
+**perf**
+内核自带性能分析工具，无需额外安装。统计 CPU 占用、函数耗时、采样调用栈，精准定位 CPU 热点函数，是高性能程序调优的核心武器。
+
+**top / htop**
+全局资源观测工具，直观查看各个进程 CPU、内存占用，快速锁定资源异常的进程，作为性能分析的第一步。
+
+## 工具组合实战范式
+
+真实开发场景中，工具不是孤立使用，一套完整排错流程通常这样执行：
+
+1. gcc/make 编译项目，添加调试符号；
+2. 程序崩溃：gdb + core 文件分析调用栈；
+3. 行为异常、IO / 文件报错：strace 跟踪系统调用；
+4. 内存持续上涨、野指针：valgrind 检测；
+5. 运行卡顿 CPU 高：top 宏观观察，perf 深挖热点做调优。
+
+这些工具全部内置在 Linux 生态中，无需复杂部署。掌握它们，摆脱对 IDE 的依赖，真正理解程序在操作系统内部是如何执行，是进阶系统开发绕不开的必修课。
+
+
+
+
+
+
+https://www.720yuntu.com/tour/a8d01899836a8849
+https://www.720yuntu.com/tour/e6a5e006c059eaf3
+https://www.720yuntu.com/tour/a6f40404ee32562e
+https://www.720yuntu.com/tour/7951d2763e0158cb
+https://www.720yuntu.com/tour/8c5a1c336bf20748
+https://www.720yuntu.com/tour/63a86e7ad333b3f4
+https://www.720yuntu.com/tour/ee1a9018c04efdea
+https://www.720yuntu.com/tour/9b3ea5bb2ead6b41
+https://www.720yuntu.com/tour/4661d322b81817b9
+https://www.720yuntu.com/tour/40218346f79baa0a
+https://www.720yuntu.com/tour/a40703431940dfe2
+https://www.720yuntu.com/tour/38fd39b1ef7cdaf2
+https://www.720yuntu.com/tour/040580e5887ace60
+https://www.720yuntu.com/tour/a8827c08e37ccc6f
+https://www.720yuntu.com/tour/66e52dfd20fa7a8a
+https://www.720yuntu.com/tour/c683196aaed6c056
+https://www.720yuntu.com/tour/9e9e99ce3c4f3f80
+https://www.720yuntu.com/tour/570fb6ad4c18199e
+https://www.720yuntu.com/tour/263e49737f047328
+https://www.720yuntu.com/tour/c0b44d1098111f83
+https://www.720yuntu.com/tour/52a8435b8fde7391
+https://www.720yuntu.com/tour/07007b96f00b95e7
+https://www.720yuntu.com/tour/d5ab5e447c520f1e
+https://www.720yuntu.com/tour/7d4825431ebe7287
+https://www.720yuntu.com/tour/73fef7a121035715
+https://www.720yuntu.com/author?pk=131389
+https://www.720yuntu.com/tour/82cb75846b7ea647
+https://www.720yuntu.com/tour/876e56855904639e
+https://www.720yuntu.com/tour/bb9378d72fe75e37
+https://www.720yuntu.com/tour/a721d53c99ff0eb0
+https://www.720yuntu.com/tour/ddd20b88fc712e0d
+https://www.720yuntu.com/tour/d2d2409909b4662c
+https://www.720yuntu.com/tour/ae43c68e2a01f165
+https://www.720yuntu.com/tour/8463ed4861c23c19
+https://www.720yuntu.com/tour/6912d8b0ca04c9dc
+https://www.720yuntu.com/tour/d93697307927b025
+https://www.720yuntu.com/tour/c1893ee9372cfc1b
+https://www.720yuntu.com/tour/82c9dd8a10ab2122
+https://www.720yuntu.com/tour/8d8e8dbb04c27217
+https://www.720yuntu.com/tour/a6957825eb561054
+https://www.720yuntu.com/tour/4dafd56f033431ee
+https://www.720yuntu.com/tour/410f7f4ba844a1f5
+https://www.720yuntu.com/tour/168f7405a0d565aa
+https://www.720yuntu.com/tour/f96d18c8dbf5e109
+https://www.720yuntu.com/tour/53f6db38e266f409
+https://www.720yuntu.com/tour/7d7aabb3761c7d66
+https://www.720yuntu.com/tour/b78960d472d69636
+https://www.720yuntu.com/tour/37a84bec7acef3c2
+https://www.720yuntu.com/tour/520d136c154a5375
+https://www.720yuntu.com/tour/6b3c2b5aeb83972d
+https://www.720yuntu.com/tour/c271660e02c2e1da
+https://www.720yuntu.com/tour/ac0f66a1921ccd7a
+https://www.720yuntu.com/author?pk=131390
+https://www.720yuntu.com/tour/572c07beaef237df
+https://www.720yuntu.com/tour/cec1599cc27a3b4d
+https://www.720yuntu.com/tour/7b0350b03b4b4661
+https://www.720yuntu.com/tour/5dbacfcef9c1cd26
+https://www.720yuntu.com/tour/a311f8b9bf00e24d
+https://www.720yuntu.com/tour/a1ddd3b99b71d885
+https://www.720yuntu.com/tour/5d98a771797bd726
+https://www.720yuntu.com/tour/aa3c037be0600ba0
+https://www.720yuntu.com/tour/0e4eeff1cc4d3a74
+https://www.720yuntu.com/tour/c2327c3d93708e98
+https://www.720yuntu.com/tour/007a2fb412be7f23
+https://www.720yuntu.com/tour/dfc8633ca6e9aaf8
+https://www.720yuntu.com/tour/261b8ab65621aaf7
+https://www.720yuntu.com/tour/1a2f78f4eb9dddd6
+https://www.720yuntu.com/tour/8f5b51bed5b72b8c
+https://www.720yuntu.com/tour/5abe47de9de01089
+https://www.720yuntu.com/tour/7bd43b50a8e83c4f
+https://www.720yuntu.com/tour/44fea15f5b6ee380
+https://www.720yuntu.com/tour/a6149208478ae5ae
+https://www.720yuntu.com/tour/a5d13d4ef1d9fc9d
+https://www.720yuntu.com/tour/0bed698e8c453098
+https://www.720yuntu.com/tour/962ad5cd5e6bbec4
+https://www.720yuntu.com/tour/1b426aeaabb2d9fd
+https://www.720yuntu.com/tour/c7ec7528b35239b3
+https://www.720yuntu.com/tour/6331ee065e5c0cd7
+https://www.720yuntu.com/tour/265c0473d3ebfed3
+https://www.720yuntu.com/tour/c18a5ec6770b78e6
+https://www.720yuntu.com/author?pk=131392
+https://www.720yuntu.com/author?pk=131391
+https://www.720yuntu.com/tour/29edb056d14650de
+https://www.720yuntu.com/tour/54d74f8d3e575f85
+https://www.720yuntu.com/tour/941687fcfed4b745
+https://www.720yuntu.com/tour/dfe35c8e62292eda
+https://www.720yuntu.com/tour/847b4c3f7cdc31e7
+https://www.720yuntu.com/tour/0771b4d4710d3409
+https://www.720yuntu.com/tour/8c7a1b05129022e3
+https://www.720yuntu.com/tour/eeb3e8cdcf212e08
+https://www.720yuntu.com/tour/99b9186c3f04e2c6
+https://www.720yuntu.com/tour/529241e95ef40a65
+https://www.720yuntu.com/tour/511af88311ad60c1
+https://www.720yuntu.com/tour/6741e722c8643730
+https://www.720yuntu.com/tour/51e0fdc7536a1a97
+https://www.720yuntu.com/tour/f9d82598f6beae06
+https://www.720yuntu.com/tour/b35b4086b8408627
+https://www.720yuntu.com/tour/8d564010146a3f77
+https://www.720yuntu.com/tour/7e65596d018ac174
+https://www.720yuntu.com/tour/42c598c77beb3c7a
+https://www.720yuntu.com/tour/48a6cee6ff637731
+https://www.720yuntu.com/tour/005a6dbd849dd954
+https://www.720yuntu.com/tour/5986a38ee12fd182
+https://www.720yuntu.com/tour/425d8a39437cf980
+https://www.720yuntu.com/tour/3d84834e65534db2
+https://www.720yuntu.com/tour/b040f4bc08699876
+https://www.720yuntu.com/tour/06d5492d81306a35
+https://www.720yuntu.com/author?pk=131393
+https://www.720yuntu.com/tour/0b83fb35ea4acae4
+https://www.720yuntu.com/tour/570bae3e88a3e395
+https://www.720yuntu.com/tour/0a8172b9e5ad0a66
+https://www.720yuntu.com/tour/a130c3bf15295e8d
+https://www.720yuntu.com/tour/c366c934aca12262
+https://www.720yuntu.com/tour/bdd0f0a6fd919d20
+https://www.720yuntu.com/tour/aa632d208b86c9bc
+https://www.720yuntu.com/tour/120781ea2030b57d
+https://www.720yuntu.com/tour/51c0403ff836b63d
+https://www.720yuntu.com/tour/ca21ab72b2e500aa
+https://www.720yuntu.com/tour/c31425ff89264a20
+https://www.720yuntu.com/tour/fc03b6a12ad33648
+https://www.720yuntu.com/tour/58b9483b5d084b43
+https://www.720yuntu.com/tour/904d8018c92b268f
+https://www.720yuntu.com/tour/0c7bdaab4ac37cfa
+https://www.720yuntu.com/tour/5affab70a1d94ed0
+https://www.720yuntu.com/tour/047cf338933e4205
+https://www.720yuntu.com/tour/a0ddc678c240f190
+https://www.720yuntu.com/tour/1587d4fee838d331
+https://www.720yuntu.com/tour/1eaaef4ade14aaf8
+https://www.720yuntu.com/tour/b190daf362e7b129
+https://www.720yuntu.com/tour/b3d7ffaf8b275329
+https://www.720yuntu.com/tour/e77555d54830d0fe
+https://www.720yuntu.com/tour/de1a58abc7b52145
+https://www.720yuntu.com/tour/0b59a036a5a33124
+https://www.720yuntu.com/tour/6169088b81857f18
+
+https://www.nowcoder.com/discuss/937531854171754496
+https://www.nowcoder.com/discuss/937532473301356544
+https://www.nowcoder.com/discuss/937532642080092160
+https://www.nowcoder.com/discuss/937532948805320704
+https://www.nowcoder.com/discuss/937533091386576896
+https://www.nowcoder.com/discuss/937533215110070272
+https://www.nowcoder.com/discuss/937533305803591680
+https://www.nowcoder.com/discuss/937533397537161216
+https://www.nowcoder.com/discuss/937533507348287488
+https://www.nowcoder.com/discuss/937533588562538496
+https://www.nowcoder.com/discuss/937533673480474624
+https://www.nowcoder.com/discuss/937533750559113216
+https://www.nowcoder.com/discuss/937533817835782144
+https://www.nowcoder.com/discuss/937533895258435584
+https://www.nowcoder.com/discuss/937533963126439936
+https://www.nowcoder.com/discuss/937534057020157952
+https://www.nowcoder.com/discuss/937534143720620032
+https://www.nowcoder.com/discuss/937534245726146560
+https://www.nowcoder.com/discuss/937534594130202624
+https://www.nowcoder.com/discuss/937534765035507712
+https://www.nowcoder.com/discuss/937534684416790528
+https://www.nowcoder.com/discuss/937534842848235520
+https://www.nowcoder.com/discuss/937534924465143808
+https://www.nowcoder.com/discuss/937535062864588800
+https://www.nowcoder.com/discuss/937535139251253248
+https://www.nowcoder.com/discuss/937535248064053248
+https://www.nowcoder.com/discuss/937535322169044992
+https://www.nowcoder.com/discuss/937535402234085376
+https://www.nowcoder.com/discuss/937535499198038016
+https://www.nowcoder.com/discuss/937535578046754816
+https://www.nowcoder.com/discuss/937535644127985664
+https://www.nowcoder.com/discuss/937535756036239360
+https://www.nowcoder.com/discuss/937535832800395264
+https://www.nowcoder.com/discuss/937535899254947840
+https://www.nowcoder.com/discuss/937535960894435328
