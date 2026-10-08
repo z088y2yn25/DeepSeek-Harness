@@ -1,0 +1,297 @@
+# 什么是 GEO 生成式引擎优化：完整拆解 AI 搜索引擎引用机制，手把手教你打造可被大模型提取采信的内容体系
+
+当我们习惯了传统搜索引擎，在蓝色链接列表里寻找答案时，一场搜索范式革命已经悄然发生。用户不再需要点开十几条网页自行整合信息，AI 生成式搜索引擎会直接提炼答案、总结观点，并标注信息来源。
+
+在这个新世界里，排名不再是唯一的胜负标准。你的内容能否被大模型检索、采信、标注引用，才是新的流量与话语权争夺点。支撑这套玩法的，就是**GEO 生成式引擎优化（Generative Engine Optimization）**。
+
+很多人会把 GEO 简单等同于升级版 SEO，或是 AEO 答案引擎优化。但 GEO 的底层逻辑完全不同：传统 SEO 争夺的是搜索结果页面的链接位次；而 GEO 争夺的，是 AI 生成答案里有限的引用席位。它不是教你欺骗大模型，而是对齐大模型检索、向量匹配、可信度评估、信息抽取的整套工作流程，把你的内容改造为大模型愿意采信、可以直接摘录的可信信息源。
+
+## 一、读懂 GEO：AI 搜索时代的全新内容优化范式
+
+GEO 概念最早由普林斯顿大学、佐治亚理工学院的研究团队在 2023 年底提出，相关论文在 KDD 2024 正式发布。研究团队发现，当引擎由 “返回网页列表” 转向 “由大模型综合多源信息生成答案”，内容的曝光逻辑发生根本性翻转：网页排名不再决定最终曝光，**信源召回率、语义匹配度、事实可信度、片段可抽取性**共同决定你的内容会不会出现在 AI 回答中。
+
+一句话定义 GEO：通过系统性优化内容的语义结构、事实表述、页面架构、权威信源矩阵，提升内容被生成式引擎检索召回、事实校验、片段提取、引用标注的概率，让你的信息成为大模型回答用户问题时的采信依据腾讯云。
+
+这里要厘清一个核心误区：GEO 不是操控 AI 强行输出指定话术，也不是利用漏洞篡改模型结论。生成式引擎内置多层校验机制，依靠交叉比对多个信源判断事实真伪。GEO 本质是一套**内容对齐工程**—— 让人类撰写的内容，适配大模型读取、切片、向量编码、事实抽取的阅读习惯。
+
+GEO 与传统 SEO 的核心差异：
+
+1. **目标不同**：SEO 目标是网页在搜索列表获得高排名，吸引用户点击；GEO 目标是内容片段被 AI 引擎选中，作为答案引用来源。
+2. **匹配逻辑不同**：SEO 侧重关键词字符匹配；GEO 侧重向量语义匹配，即便没有完全命中关键词，语义契合也能被召回。
+3. **评估维度不同**：SEO 重点看外链、页面权重、点击率；GEO 重点看事实可验证性、信息一致性、片段独立性、来源稳定性。
+4. **流量形态不同**：SEO 流量是用户点击进入网站；GEO 流量分为两类，一类是 AI 回答中标注来源带来的跳转，另一类是品牌信息直接嵌入 AI 答案，完成认知种草。
+
+二者并非替代关系，而是互补体系。SEO 守住传统网页搜索入口，GEO 抢占 AI 生成答案的认知席位，双线并行才能覆盖完整用户搜索链路。
+
+## 二、深度拆解 AI 搜索引擎的引用采信底层机制
+
+想要做好 GEO，就必须看懂 AI 生成式引擎拿到用户提问后的完整工作链路。绝大多数 AI 搜索采用 RAG 检索增强生成架构，整个引用流程分为 4 个核心阶段：**向量检索召回 → 信源可信度打分 → 信息片段抽取 → 多源融合生成并标注引用**。
+
+### 阶段 1：向量检索召回 ——AI 如何 “看见” 你的内容
+
+当用户提出问题，引擎不会直接用大模型凭空回答。首先会把用户问题转化为向量，在海量网页向量库中，计算语义相似度，召回一批候选网页。
+
+这个环节和关键词搜索最大区别：引擎会把网页切分成多个文本块（Chunk），每一个小块独立生成向量。**不是整页参与匹配，而是页面内独立信息片段参与召回**。
+
+这就解释了为什么很多长篇大论、段落缠绕的文章很难被 AI 引用：段落信息混杂，一个块里面同时包含多个无关主题，向量混杂，相似度降低，难以被检索命中。而结构清晰、单段只讲一个事实的内容，更容易被单独切片召回。
+
+### 阶段 2：信源可信度打分 ——AI 判断 “该不该相信你”
+
+召回只是入场券，可信度评估才是筛选门槛。AI 引擎会对候选信源做多维度信任打分，淘汰低可信度内容。打分维度包含：
+
+- 站点基础信号：域名历史、页面稳定性、抓取可访问性、是否存在大量 404 页面；
+- 作者与主体信号：内容是否标注作者、机构背景，是否属于垂直领域专业站点；
+- 事实可验证性：文中数据、结论是否标注来源、时间、适用范围；无依据夸大、模糊描述会大幅降分；
+- 跨信源一致性：核心事实是否能被其他独立第三方内容交叉印证。如果全网只有你一家持有该说法，AI 会倾向判定信息存疑，放弃引用；
+- 负面信号：内容前后矛盾、频繁修改核心事实、大量广告软文堆砌，会直接降低该站点整体信源权重。
+
+这里有一个关键规则：**自证不成立**。仅仅依靠官网单方面的宣传话术，很难拿到高可信度分数。权威第三方媒体、行业白皮书、专业期刊的佐证内容，才是信任加分项。
+
+### 阶段 3：信息片段抽取 ——AI 挑选 “可以直接摘抄的句子”
+
+筛选完可信信源后，模型会进入信息抽取环节，从候选网页中提取精炼、独立、完整的事实片段。适合抽取的片段有鲜明特征：一句话或一个短段落，只承载一条独立事实，上下文不依赖复杂铺垫，定义清晰、边界明确。
+
+反面案例：长篇抒情、主观感想、多层嵌套的复杂长句、大量比喻修辞。这类文本人类读起来生动，但大模型很难剥离主观情绪，提取纯粹事实，即便页面被召回，也不会被选入最终答案。
+
+### 阶段 4：多源融合生成，输出带引用标注的答案
+
+最后一步，大模型整合多条来自不同信源的事实片段，组织成通顺回答，同时附上引用来源链接。模型会比对多个来源的信息，当多个可信来源描述一致时，事实会被优先采纳；当信源之间出现冲突，模型通常会规避结论，或者同时列出不同观点。
+
+整个流程走完，你的内容才有可能出现在 AI 回答的引用区。任何一个环节出现短板，都会导致内容虽然被搜索引擎收录，却永远无法被大模型采信。
+
+## 三、GEO 落地实操：手把手搭建可被大模型提取采信的内容体系
+
+GEO 不是写一两篇优化文章，而是搭建一套完整的**可信内容资产体系**，分为五层架构：实体基准层、事实素材层、证据背书层、页面结构层、持续监测迭代层。下面从底层到上层，一步步落地。
+
+### 第一步：梳理实体与标准事实库，统一全渠道口径
+
+实体是 GEO 体系的地基。实体可以是品牌、产品、技术术语、服务方案、行业概念。针对每一个实体，整理标准化事实条目。
+
+每条事实遵循固定规范：**主体 + 属性 + 数值 / 结论 + 时间 + 适用边界 + 来源**。
+❌ 错误写法：本平台性能强大，体验领先行业。（主观模糊，无边界，无法核验）
+✅ GEO 标准事实写法：XX 引擎 V3 版本，在 2025 年基准测试中，单请求响应延迟低于 200ms，适用于百万级文本向量检索场景，测试报告发布于官网技术白皮书 2025 版。
+
+操作要点：
+
+1. 区分事实陈述与主观评价。GEO 内容优先保留可验证事实，减少主观形容词；
+2. 建立事实唯一口径，官网、博客、媒体稿件、百科页面保持表述一致。全网同一事实口径冲突，会直接降低可信度；
+3. 对过时信息做标记归档，避免新旧版本信息混杂，造成模型事实混淆。
+
+### 第二步：重构页面结构，适配大模型切片抽取习惯
+
+页面结构是 GEO 优化最容易被忽略，但见效极快的环节。大模型读取网页时，依靠标题层级、列表、段落分隔来切分文本块。
+
+页面结构优化规范：
+
+1. 使用清晰的 H1、H2、H3 层级标题，一个标题对应一个独立主题，不要标题堆砌；
+2. 核心定义、关键数据放在页面靠前位置（首段、摘要），不要埋在文末；
+3. 善用有序列表、无序列表、表格。表格数据是大模型非常喜欢抽取的信息形式，结构化数据召回和采信概率远高于纯文本；
+4. 段落短而独立，一个段落只承载一条核心事实。不要大段文字堆砌，不要在同一个段落混合多个不相关话题；
+5. 页面保持稳定 URL，不要频繁修改链接。AI 引用会绑定固定 URL，链接变动会导致引用失效。
+
+简单来说，写 GEO 内容，要同时兼顾人类阅读流畅度，还要照顾机器切片阅读。文章读起来生动易懂，拆分后的每一个文本块，都能独立表达一条完整事实。
+
+### 第三步：搭建分层信源矩阵，构建交叉验证信任网络
+
+只靠自有站点很难获得高可信度，需要搭建分级信源体系，形成互相印证的证据网络。我们可以把信源分为 4 个等级：
+
+- L1 一手信源：官网、官方白皮书、产品文档，作为事实基准锚点；
+- L2 权威独立信源：行业权威媒体、专业期刊、第三方检测机构报告，用来交叉佐证核心事实，是信任体系核心；
+- L3 垂直行业信源：行业博客、垂直社区专业文章，丰富语义覆盖，扩大召回场景；
+- L4 自有自媒体渠道：公众号、短视频文稿等，仅做语义补充，不承担事实佐证作用。
+
+实操策略：核心事实，至少在 2 个以上独立 L2 信源同步发布一致表述。当大模型检索时，能够找到多条独立来源互相印证，这条事实采信概率会显著提升。
+
+> 
+> 重要提醒：不要制造虚假信源、大量站群互相引用。AI 引擎能够识别站群关联关系，批量自引不仅无法加分，还会判定为低质量内容，直接降权。
+
+### 第四步：内容写作专项优化，打造高可抽取文本
+
+GEO 文章写作，不是抛弃文笔，而是平衡可读性与机器可抽取性，这里分享实用写作原则：
+
+1. **定义前置**：开篇直接给出术语、产品、方案的清晰定义，不要铺垫大量故事之后才给出核心概念；
+2. **区分事实与观点**：事实单独成段；观点、分析、评价放在事实之后，明确标注为分析结论；
+3. **量化表达，标注边界**：能用数字就不用模糊描述，同时写明适用范围、限制条件，避免绝对化表述；
+4. **减少冗余修辞**：保留流畅叙事，但减少大量隐喻、夸张抒情；这类内容会干扰事实抽取；
+5. **增加 FAQ 模块**：FAQ 是 GEO 黄金内容形式。每一条问答，独立对应一个用户真实查询，天然适配用户提问式检索，极易被向量召回。
+
+### 第五步：建立 GEO 监测与迭代闭环
+
+GEO 效果无法一次性定型，需要持续监测、迭代优化。
+
+1. 构建一批目标用户查询词库，定期使用 AI 搜索工具查询，记录你的内容是否在 AI 回答中被引用；
+2. 区分两种结果：召回但未采信，以及完全没有召回。
+   - 无召回：大概率是页面抓取问题、语义不匹配、内容块过大，优化页面抓取与文本切片；
+   - 召回但不采信：多为事实缺乏第三方佐证、表述模糊、存在信息冲突，补充权威信源，修正事实表述；
+3. 定期巡检所有信源页面，清理失效链接、过期数据，更新过时事实；
+4. 持续扩充事实库，覆盖更多长尾用户提问场景，扩大语义覆盖范围。
+
+## 四、GEO 避坑指南：这些误区会直接导致优化失效
+
+1. **误区一：GEO 就是堆砌关键词**
+GEO 依靠向量语义匹配，关键词堆砌会破坏事实可读性，提升文本冗余度，降低可信度，完全得不偿失。
+2. **误区二：大量生成 AI 伪原创内容做信源**
+批量 AI 生成的同质化内容，事实重复、缺乏真实佐证，引擎很容易识别。这类内容几乎无法成为可信信源，还会拖累同域名下其他页面的信任分数。
+3. **误区三：追求一次性霸屏 AI 回答**
+GEO 是长期资产建设，不是短期黑帽手段。AI 引擎持续迭代校验机制，依靠技巧短期获取引用很容易失效；稳定、真实、可验证的事实资产，才具备长期价值。
+4. **误区四：认为 GEO 可以完全替代 SEO**
+传统网页搜索依旧占据巨大流量，很多用户依然习惯浏览网页。SEO 负责网页入口，GEO 负责 AI 答案引用，二者协同才是完整方案。
+
+## 五、未来展望：GEO，构建品牌在 AI 世界的数字事实资产
+
+互联网的信息载体正在发生迁移：过去，品牌信息存储在无数网页链接里；未来，品牌事实将存储在大模型的知识库中。
+
+当用户向 AI 咨询产品、行业方案、技术概念时，AI 给出的答案，本质上是对全网可信内容的浓缩。如果你的内容体系没有做好 GEO 建设，相当于在 AI 认知世界里缺席，用户获取信息时，你的品牌、产品、观点不会被提及，话语权被竞争对手占据。
+
+GEO 的本质，早已超出营销优化的范畴。它是一套数字事实资产管理体系：把你的专业知识、产品信息、行业观点，转化成一套可检索、可验证、可抽取、可采信的标准化内容资产，让大模型在回答用户问题时，自然引用你的信息。
+
+搜索引擎的时代，链接是流量入口；AI 生成引擎时代，**可信事实片段，就是新的信息入口**。GEO，就是通往这个新入口的工程方法论。
+
+
+
+
+
+
+https://vr.justeasy.cn/view/127951h4833q2ke8-1791483345.html
+https://vr.justeasy.cn/view/179k14mud8834296-1791483443.html
+https://vr.justeasy.cn/view/17ty9z1y4f834p76-1791483492.html
+https://vr.justeasy.cn/view/j17x914k8r335s26-1791483543.html
+https://vr.justeasy.cn/view/1789g1483voy5786-1791483593.html
+https://vr.justeasy.cn/view/1a73t9q14831g626-1791483643.html
+https://vr.justeasy.cn/view/17993qs148367r16-1791483693.html
+https://vr.justeasy.cn/view/1079w1t4835t7297-1791483743.html
+https://vr.justeasy.cn/view/1791483ph7fv7qw7-1791483794.html
+https://vr.justeasy.cn/view/gjx51791h2483827-1791483843.html
+https://vr.justeasy.cn/view/816bd7u9t1483877-1791483893.html
+https://vr.justeasy.cn/view/17s941v48rq3y926-1791483943.html
+https://vr.justeasy.cn/view/ze11o7914839bt76-1791483993.html
+https://vr.justeasy.cn/view/1e79110b4t8402l6-1791484043.html
+https://vr.justeasy.cn/view/fzw17914f84097a6-1791484093.html
+https://vr.justeasy.cn/view/k1s6o791io484126-1791484143.html
+https://vr.justeasy.cn/view/147691f4f084e176-1791484192.html
+https://vr.justeasy.cn/view/1u779dg14842m278-1791484244.html
+https://vr.justeasy.cn/view/179148439j247f58-1791484294.html
+https://vr.justeasy.cn/view/17797a14843v2498-1791484344.html
+https://vr.justeasy.cn/view/17v6h914i84in378-1791484394.html
+https://vr.justeasy.cn/view/u1y7l91g41848427-1791484444.html
+https://vr.justeasy.cn/view/14t8h7914844b377-1791484494.html
+https://vr.justeasy.cn/view/107p9q1484sb5827-1791484543.html
+https://vr.justeasy.cn/view/127o09x1648q4577-1791484594.html
+https://vr.justeasy.cn/view/rxu17z91n4184627-1791484644.html
+https://vr.justeasy.cn/view/a1a7w91u48074677-1791484694.html
+https://vr.justeasy.cn/view/1791t48teifi4727-1791484743.html
+https://vr.justeasy.cn/view/61u79821484z77x6-1791484793.html
+https://vr.justeasy.cn/view/417a917448q24826-1791484843.html
+https://vr.justeasy.cn/view/179a1q48b43087d6-1791484893.html
+https://vr.justeasy.cn/view/17luk91s448b4926-1791484942.html
+https://vr.justeasy.cn/view/z1jy7931d4m84976-1791484993.html
+https://vr.justeasy.cn/view/1791m4qut58x5025-1791485042.html
+https://vr.justeasy.cn/view/x17gfp91485m0g76-1791485092.html
+https://vr.justeasy.cn/view/10cq7914805512x6-1791485143.html
+https://vr.justeasy.cn/view/1u7914b85a1tp176-1791485192.html
+https://vr.justeasy.cn/view/y1m7sl9u14852b25-1791485242.html
+https://vr.justeasy.cn/view/217jwm9148527jh6-1791485293.html
+https://vr.justeasy.cn/view/1879713485ou3o25-1791485342.html
+https://vr.justeasy.cn/view/1791o4845bok37c5-1791485391.html
+https://vr.justeasy.cn/view/4w17914895cqz424-1791485441.html
+https://vr.justeasy.cn/view/1e7z9166485vq475-1791485492.html
+https://vr.justeasy.cn/view/1791y4ur48k552h5-1791485542.html
+https://vr.justeasy.cn/view/q1791p4i855z57x5-1791485592.html
+https://vr.justeasy.cn/view/v1y7291o4d856h25-1791485641.html
+https://vr.justeasy.cn/view/x1f799yu14856x74-1791485691.html
+https://vr.justeasy.cn/view/179c148v857592x4-1791485740.html
+https://vr.justeasy.cn/view/1q79148m57b7bcz4-1791485790.html
+https://vr.justeasy.cn/view/1k791s47854ja823-1791485840.html
+https://vr.justeasy.cn/view/17t911348458r723-1791485890.html
+https://vr.justeasy.cn/view/q1791l6485h92fz3-1791485940.html
+https://vr.justeasy.cn/view/1kt79za914859q73-1791485990.html
+https://vr.justeasy.cn/view/179j1b486i1f02p6-1791486043.html
+https://vr.justeasy.cn/view/175629m14z846075-1791486092.html
+https://vr.justeasy.cn/view/179148e61o2n4285-1791486142.html
+https://vr.justeasy.cn/view/1d7149p114861375-1791486192.html
+https://vr.justeasy.cn/view/671zo7914x876225-1791486241.html
+https://vr.justeasy.cn/view/17y91r4f0ss86274-1791486291.html
+https://vr.justeasy.cn/view/f41a79cz61486324-1791486341.html
+https://vr.justeasy.cn/view/u1791k4v2863e7z4-1791486390.html
+https://vr.justeasy.cn/view/1m791kwm484642p3-1791486440.html
+https://vr.justeasy.cn/view/17sj914864ho76r3-1791486490.html
+https://vr.justeasy.cn/view/1791w4689i6b5523-1791486540.html
+https://vr.justeasy.cn/view/q17ex3v914865h73-1791486590.html
+https://vr.justeasy.cn/view/217l92k1486md623-1791486640.html
+https://vr.justeasy.cn/view/179148lb66wv47g3-1791486690.html
+https://vr.justeasy.cn/view/179wag1xx4867c23-1791486740.html
+https://vr.justeasy.cn/view/179fao14867xll73-1791486790.html
+https://vr.justeasy.cn/view/1a97p9148068oh23-1791486840.html
+https://vr.justeasy.cn/view/157nic9p31487048-1791487065.html
+https://vr.justeasy.cn/view/117914t87019owq8-1791487115.html
+https://vr.justeasy.cn/view/179r148l76t14x78-1791487164.html
+https://vr.justeasy.cn/view/ib1791dl48t75198-1791487214.html
+https://vr.justeasy.cn/view/1791x48dg7e24ry8-1791487264.html
+https://vr.justeasy.cn/view/179141497c8g7297-1791487314.html
+https://vr.justeasy.cn/view/1d791w4e87aq3z47-1791487364.html
+https://vr.justeasy.cn/view/1729u0139487d397-1791487414.html
+https://vr.justeasy.cn/view/s127l9t148m67447-1791487464.html
+https://vr.justeasy.cn/view/1791487dqd4w4987-1791487514.html
+https://vr.justeasy.cn/view/1l7n9h148a7x5h47-1791487564.html
+https://vr.justeasy.cn/view/1791d487359pwgx7-1791487613.html
+https://vr.justeasy.cn/view/170914s8zc7b6p46-1791487663.html
+https://vr.justeasy.cn/view/q1v7f951f4187697-1791487713.html
+https://vr.justeasy.cn/view/167916a487cha746-1791487763.html
+https://vr.justeasy.cn/view/1979e4b1487r0796-1791487815.html
+https://vr.justeasy.cn/view/j179yz1048784xt8-1791487865.html
+https://vr.justeasy.cn/view/h179h14v878yy9l7-1791487914.html
+https://vr.justeasy.cn/view/g17891l24c87o947-1791487964.html
+https://vr.justeasy.cn/view/017c90148857u997-1791488014.html
+https://vr.justeasy.cn/view/l1xc079g14880p48-1791488065.html
+https://vr.justeasy.cn/view/17981l4m3m881097-1791488114.html
+https://vr.justeasy.cn/view/17914w88978b2147-1791488164.html
+https://vr.justeasy.cn/view/v179g14s8p8q1197-1791488214.html
+https://vr.justeasy.cn/view/1z9l57sg91488247-1791488264.html
+https://vr.justeasy.cn/view/179148xy8n293er7-1791488314.html
+https://vr.justeasy.cn/view/17z9o17480ug8346-1791488363.html
+https://vr.justeasy.cn/view/1791o48d7783s9b7-1791488414.html
+https://vr.justeasy.cn/view/91u7591z49884g46-1791488463.html
+https://vr.justeasy.cn/view/17i914j85fx89496-1791488513.html
+https://vr.justeasy.cn/view/51679j1478854hf5-1791488562.html
+https://vr.justeasy.cn/view/172921nis48j8596-1791488612.html
+https://vr.justeasy.cn/view/179w14h88w6u4055-1791488662.html
+https://vr.justeasy.cn/view/vq9179h1428l8695-1791488712.html
+https://vr.justeasy.cn/view/1c7c91x468980746-1791488763.html
+https://vr.justeasy.cn/view/8n17991z48879mr6-1791488813.html
+https://vr.justeasy.cn/view/l179149wu888u4i6-1791488862.html
+https://vr.justeasy.cn/view/1n7910m48k8vq896-1791488912.html
+https://vr.justeasy.cn/view/179i1q64889oym46-1791488963.html
+https://vr.justeasy.cn/view/17i9q012488899i6-1791489013.html
+https://vr.justeasy.cn/view/3zfw17h914j89046-1791489063.html
+https://vr.justeasy.cn/view/o179148e90v9l067-1791489113.html
+https://vr.justeasy.cn/view/17f9t21f48v91146-1791489163.html
+https://vr.justeasy.cn/view/17d9m14x8ab919y6-1791489213.html
+https://vr.justeasy.cn/view/1x79yf1489s24n06-1791489262.html
+https://vr.justeasy.cn/view/g1l79148de932d95-1791489312.html
+https://vr.justeasy.cn/view/d1791548b9430845-1791489361.html
+https://vr.justeasy.cn/view/t10799y14e893m95-1791489412.html
+https://vr.justeasy.cn/view/j17i9s14ay8y9445-1791489462.html
+https://vr.justeasy.cn/view/1t799f14h89xv495-1791489512.html
+https://vr.justeasy.cn/view/17y91k4893965g45-1791489562.html
+https://vr.justeasy.cn/view/17s3941489358d95-1791489615.html
+https://vr.justeasy.cn/view/1679l14289bh6418-1791489665.html
+https://vr.justeasy.cn/view/1o7a893148a96998-1791489715.html
+https://vr.justeasy.cn/view/13799k1i4m897p48-1791489765.html
+https://vr.justeasy.cn/view/ou1yd791c4v89798-1791489815.html
+https://vr.justeasy.cn/view/1l79a148r95e84u8-1791489866.html
+https://vr.justeasy.cn/view/tv179wan1n489899-1791489916.html
+https://vr.justeasy.cn/view/4179142p6a8s9949-1791489966.html
+https://vr.justeasy.cn/view/1w7s914x9899f999-1791490016.html
+https://vr.justeasy.cn/view/1klk7941490w04y9-1791490066.html
+https://vr.justeasy.cn/view/179y1490v10pv5i0-1791490117.html
+https://vr.justeasy.cn/view/1cfqc879149015f0-1791490167.html
+https://vr.justeasy.cn/view/17914u9mh6700201-1791490217.html
+https://vr.justeasy.cn/view/1joq7v9149vt0251-1791490267.html
+https://vr.justeasy.cn/view/1517914f903occ00-1791490317.html
+https://vr.justeasy.cn/view/o5c1791490o35li0-1791490367.html
+https://vr.justeasy.cn/view/4n1w791iy49040t1-1791490417.html
+https://vr.justeasy.cn/view/1k791249042w5bk0-1791490468.html
+https://vr.justeasy.cn/view/z1m79149v0r750q1-1791490517.html
+
+
+
