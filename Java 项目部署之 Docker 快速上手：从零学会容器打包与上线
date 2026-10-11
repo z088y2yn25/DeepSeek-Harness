@@ -1,0 +1,511 @@
+Java 项目部署
+在传统 Java 项目部署场景中，开发者和运维人员总会被各种环境问题困扰：本地运行正常的项目，部署到服务器后出现 JDK 版本不兼容、依赖缺失、环境变量配置错误、系统权限不一致等各类问题，也就是行业内经典的“本地可跑，线上崩”。同时，传统部署方式流程繁琐，需要手动安装 JDK、配置环境、上传项目、启停服务，集群部署时更是重复劳作，效率极低。
+而 Docker 容器化技术的出现，彻底解决了 Java 项目部署的痛点。它可以将项目代码、运行依赖、运行环境、配置参数统一打包成标准化镜像，实现“一次打包，处处运行”，彻底隔绝环境差异。无论是单机部署、服务器集群、云平台上线，都能保证项目运行环境完全一致，极大降低部署成本和运维压力。本文将从零起步，手把手带你掌握 Java 项目 Docker 容器打包、镜像构建、容器运行、线上上线全流程，兼顾基础原理与实战技巧，新手也能轻松看懂上手。
+一、零基础读懂：Docker 核心原理（Java 开发者必知）
+想要熟练部署 Java 项目，无需深究 Docker 底层内核原理，只需掌握核心核心概念，理清整体运行逻辑，就能规避 90% 的部署问题。
+1.2 三大核心概念（镜像、容器、仓库）
+这三个概念是 Docker 部署 Java 项目的核心，贯穿整个打包、运行、上线流程：
+- 镜像（Image）：可以理解为 Java 项目的“安装包+运行环境包”，是只读的静态模板。里面包含了 JDK 运行环境、项目 Jar 包、启动命令、环境配置等所有运行所需资源。我们打包 Java 项目的核心操作，就是构建专属的 Docker 镜像。
+- 容器（Container）：镜像的运行实例，是动态的、独立的运行环境。一个镜像可以启动多个相互隔离的容器，每个容器独立运行、互不干扰，Java 项目最终就是在容器中对外提供服务。
+- 仓库（Repository）：用来存放 Docker 镜像的远程仓库，分为官方公共仓库（Docker Hub）和私有仓库。项目打包完成后，可将镜像推送至仓库，后续服务器上线、集群部署时直接拉取镜像即可，无需重复打包。
+1.3 Docker 部署 Java 的核心优势
+- 环境统一：彻底解决本地、测试、生产环境不一致问题，杜绝“环境水土不服”报错；
+- 部署高效：摒弃手动配置环境的繁琐流程，一条命令即可完成项目启动、重启、迁移；
+- 资源轻量化：相比虚拟机，容器启动秒级完成，内存、CPU 占用极低，一台服务器可部署数十个 Java 服务；
+- 便于运维迭代：支持镜像版本管理，项目更新仅需重新打包镜像、替换容器，回滚操作简单高效。
+二、前置准备：Docker 安装与环境验证
+本文以主流的 Linux CentOS7/8、Windows、Mac 系统为例，提供通用安装方案，适配绝大多数开发和服务器环境，全程傻瓜式操作。
+2.1 Docker 安装步骤
+1、Linux（CentOS）安装
+依次执行以下命令，完成 Docker 一键安装、启动和自启配置：
+# 1. 卸载旧版本（如有）
+yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine
+
+# 2. 安装依赖工具
+yum install -y yum-utils
+
+# 3. 设置Docker官方镜像源
+yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+# 4. 安装Docker核心组件
+yum install -y docker-ce docker-ce-cli containerd.io
+
+# 5. 启动Docker并设置开机自启
+systemctl start docker
+systemctl enable docker
+2、Windows/Mac 安装
+直接下载 Docker Desktop 客户端，安装后双击启动即可，适配 Windows10+、Mac 全系列新版本，图形化界面操作，无需复杂命令配置，新手友好。
+安装完成后，打开终端执行以下命令，验证 Docker 是否安装成功：
+2.2 环境验证
+docker -v
+若输出 Docker 版本信息，说明安装成功。为提升国内镜像拉取速度，建议配置阿里云镜像加速器，修改 Docker 镜像源，避免下载超时问题。
+三、核心实操：Java 项目容器化打包全流程
+我们以最常用的 SpringBoot 项目为例（普通 Java Web 项目通用），从项目打包、Dockerfile 编写、镜像构建、容器运行，一步步完成容器化部署，全程贴合企业实战场景。
+3.1 第一步：打包 Java 项目 Jar 包
+首先将开发完成的 Java 项目打包为可运行的 Jar 包，这是 Docker 镜像构建的基础文件。
+- Maven 项目：在 IDEA 右侧 Maven 工具栏，执行 clean package 命令，项目根目录 target 文件夹下会生成 Jar 包（如 demo-0.0.1-SNAPSHOT.jar）；
+- Gradle 项目：执行 gradle build 命令生成 Jar 包。
+打包完成后，单独新建一个文件夹，将生成的 Jar 包放入其中，后续所有 Docker 操作均在该文件夹下执行，保证目录整洁。
+3.2 第二步：编写核心配置文件 Dockerfile
+Dockerfile 是 Docker 构建镜像的核心脚本文件，无文件后缀，通过一系列指令定义镜像的构建规则、运行环境、启动方式，相当于镜像的“施工图纸”。我们在 Jar 包同级目录新建名为 Dockerfile 的文件，编写企业级标准配置，兼顾轻量化、稳定性和兼容性。
+# 1. 基础镜像：选用轻量化JDK运行环境（适配Java8/17主流版本）
+# eclipse-temurin为官方开源镜像，安全稳定、体积更小，优于传统openjdk镜像
+FROM eclipse-temurin:17-jdk-jammy
+
+# 2. 定义容器工作目录，所有后续命令均在该目录执行
+WORKDIR /app
+
+# 3. 设置容器时区为上海，解决日志时间、系统时间偏差问题
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 4. 复制本地Jar包到容器工作目录，重命名为简洁名称
+COPY target/*.jar app.jar
+
+# 5. 声明容器对外暴露的端口（与项目配置端口一致，默认8080）
+EXPOSE 8080
+
+# 6. 容器启动命令：运行Java项目，指定JVM基础参数
+ENTRYPOINT ["java","-jar","-Xms256m","-Xmx512m","app.jar"]
+3.3 关键指令逐行详解（新手必看）
+弄懂每条指令的含义，才能灵活修改适配不同项目，避免部署报错：
+- FROM：指定基础镜像，相当于为项目搭建基础运行环境。这里选用 JDK17 轻量化镜像，若项目为 Java8，可替换为 eclipse-temurin:8-jdk-jammy，轻量化镜像可大幅缩减镜像体积，提升构建速度；
+- WORKDIR：设置容器内部工作目录，自动创建目录，无需手动新建，统一项目运行路径；
+- ENV/RUN：配置容器时区，解决 Docker 容器默认时区与国内不符，导致日志时间错乱的常见问题；
+- COPY：将本地打包好的 Jar 包复制到容器工作目录中，支持通配符匹配 target 目录下的 Jar 包，适配不同版本项目；
+- EXPOSE：声明容器对外开放的端口，仅为声明作用，不主动暴露端口，最终端口映射需在启动容器时配置；
+- ENTRYPOINT：容器启动的核心命令，容器启动后自动执行该命令，运行 Java 项目，同时配置 JVM 内存参数，避免服务器内存溢出。
+3.4 第三步：构建 Docker 镜像
+打开终端，进入 Dockerfile 和 Jar 包所在目录，执行镜像构建命令，生成专属 Java 项目镜像：
+# 构建镜像：-t 指定镜像名称和版本，格式 镜像名:版本号，末尾 . 不可省略（指定构建上下文）
+docker build -t java-demo:v1.0 .
+构建过程说明：
+执行命令后，Docker 会自动拉取基础 JDK 镜像，依次执行 Dockerfile 中的所有指令，逐层构建镜像。首次构建会下载基础镜像，耗时稍长，后续迭代构建会缓存历史层级，速度大幅提升。
+常用镜像查看命令：
+# 查看本地所有镜像
+docker images
+
+# 删除无用镜像（释放磁盘空间）
+docker rmi 镜像ID
+若终端显示构建成功，且能查询到 java-demo:v1.0 镜像，说明镜像构建完成。
+3.5 第四步：启动容器运行 Java 项目
+镜像构建完成后，通过镜像启动容器，实现项目在线运行，执行以下启动命令：
+# 启动容器：端口映射+后台运行+容器命名
+docker run -d -p 8080:8080 --name java-demo-container java-demo:v1.0
+命令参数详解：
+- -d：后台守护进程运行容器，关闭终端后项目不停止；
+- -p 8080:8080：端口映射，宿主机端口:容器端口，将服务器8080端口请求转发到容器8080端口，实现外网访问；若宿主机端口被占用，可修改为8081、8082等；
+- --name：自定义容器名称，方便后续管理；
+- 最后紧跟镜像名称和版本，指定基于该镜像启动容器。
+3.6 第五步：验证项目部署成功
+# 查看正在运行的容器
+docker ps
+
+# 查看所有容器（包含已停止的）
+docker ps -a
+1、查看容器运行状态
+若容器状态为 Up，说明容器启动成功；若状态为 Exited，说明启动失败，可通过日志排查问题。
+2、查看项目运行日志
+# 实时查看容器日志，排查项目启动问题
+docker logs -f java-demo-container
+若日志中无报错，显示 SpringBoot 项目启动完成，说明项目正常运行。
+3、外网访问验证
+打开浏览器，访问 服务器IP:8080，若能正常访问项目页面，代表 Docker 容器化部署全程成功。
+四、容器日常运维核心命令（企业必备）
+项目上线后，日常运维离不开基础 Docker 命令，整理高频实用命令，覆盖启停、重启、删除、更新等场景：
+# 1. 停止运行中的容器
+docker stop 容器名/容器ID
+
+# 2. 启动已停止的容器
+docker start 容器名/容器ID
+
+# 3. 重启容器（项目更新后常用）
+docker restart 容器名/容器ID
+
+# 4. 删除容器（必须先停止容器）
+docker rm 容器名/容器ID
+
+# 5. 进入容器内部（排查环境、文件问题）
+docker exec -it 容器名/容器ID /bin/bash
+
+# 6. 查看容器资源占用（CPU/内存）
+docker stats
+五、项目迭代更新与线上最佳实践
+项目迭代更新是部署高频场景，很多新手会直接重复构建镜像、启动容器，导致产生大量冗余镜像和容器，这里分享规范的迭代更新流程：
+1. 重新打包项目：代码更新后，执行 Maven/Gradle 打包，生成新 Jar 包；
+3. 构建新版本镜像：修改镜像版本号（如 v1.1），执行 docker build 构建新镜像；
+4. 停止并删除旧容器：停止旧版本容器并删除，避免端口冲突；
+5. 启动新容器：基于新版本镜像启动容器，完成项目更新；
+6. 清理冗余资源：删除旧版本镜像，释放服务器磁盘空间，保持环境整洁。
+企业级优化技巧
+- 多阶段构建瘦身：复杂项目可采用 Docker 多阶段构建，分离编译环境和运行环境，剔除编译冗余依赖，将镜像体积从数百M压缩至几十M，提升部署效率；
+- 统一镜像版本管理：严格遵循版本迭代规则，不覆盖旧镜像，方便项目快速回滚；
+- 搭配 Docker Compose：多服务项目（Java+MySQL+Redis）可通过 Compose 一键编排部署，无需逐个启动容器，适配微服务场景；
+- 配置 JVM 参数优化：根据服务器配置调整内存参数，生产环境建议配置堆内存、GC 参数，提升项目稳定性。
+六、新手常见报错与解决方案
+整理新手部署 Java 项目时的高频报错问题，快速排查解决：
+1、容器启动后立即退出（Exited 状态）
+常见原因：Dockerfile 启动命令错误、Jar 包损坏、项目端口配置错误。解决方案：通过 docker logs 查看日志，针对性修复命令或重新打包 Jar 包。
+2、端口占用报错
+常见原因：宿主机8080端口被其他服务占用，或旧容器未删除。解决方案：更换宿主机映射端口，或停止占用端口的服务、清理旧容器。
+3、镜像构建超时
+常见原因：默认镜像源下载速度慢。解决方案：配置国内阿里云、华为云镜像加速器，大幅提升拉取速度。
+4、容器内项目日志时间错乱
+常见原因：容器默认时区为UTC时区。解决方案：在 Dockerfile 中配置时区环境变量，即本文上述标准配置。
+七、总结
+通过本文从零实操，我们完整掌握了 Docker 容器化部署 Java 项目的全流程：从 Docker 基础原理、环境搭建，到 Dockerfile 编写、镜像构建、容器运行，再到项目迭代运维、问题排查，覆盖新手入门到企业实战的所有核心内容。
+Docker 容器化彻底颠覆了传统 Java 项目部署模式，解决了环境不一致、部署繁琐、运维困难等行业痛点。对于 Java 开发者而言，掌握 Docker 部署是必备技能，无论是单体项目部署，还是后续微服务、云原生架构迭代，都是核心基础。熟练掌握这套流程后，可实现 Java 项目一键打包、秒级部署、跨环境无缝迁移，大幅提升开发和运维效率。
+
+
+
+
+
+
+https://www.720yuntu.com/tour/e4aa552e47bfa2d8
+https://www.720yuntu.com/tour/0f26357485a348c3
+https://www.720yuntu.com/tour/c393f5f77aa6f437
+https://www.720yuntu.com/tour/427116599bcf9c9b
+https://www.720yuntu.com/tour/f9dac75914cac3d1
+https://www.720yuntu.com/tour/c96ab9638248748d
+https://www.720yuntu.com/tour/c8d297e3966a558a
+https://www.720yuntu.com/tour/d12131b740fde239
+https://www.720yuntu.com/tour/4cfe8d113f130c59
+https://www.720yuntu.com/tour/45b4139060f091e4
+https://www.720yuntu.com/tour/2de1d6b186440b7f
+https://www.720yuntu.com/tour/f2256f2388b43776
+https://www.720yuntu.com/tour/003ceffa3212ed7d
+https://www.720yuntu.com/tour/e7c9b8c60ca22c4a
+https://www.720yuntu.com/tour/a40160fcc2a9c14a
+https://www.720yuntu.com/tour/73f81d3600363d66
+https://www.720yuntu.com/tour/19b90db7bf391689
+https://www.720yuntu.com/tour/b6e922cf4c5981f9
+https://www.720yuntu.com/tour/77558d69cb623a5d
+https://www.720yuntu.com/tour/f44acb1d0c39d838
+https://www.720yuntu.com/tour/adb5eeabb01c9406
+https://www.720yuntu.com/tour/05226e92a7cbe6cd
+https://www.720yuntu.com/tour/480668ea24210fdc
+https://www.720yuntu.com/tour/95a926b738e34913
+https://www.720yuntu.com/tour/2b6e3b28511be52c
+https://www.720yuntu.com/author?pk=131424
+https://www.720yuntu.com/tour/206faa9883cb3d3a
+https://www.720yuntu.com/tour/d36ee6c479e63857
+https://www.720yuntu.com/tour/f1119e771a00917e
+https://www.720yuntu.com/tour/a8f4f5551474b01f
+https://www.720yuntu.com/tour/c8b69776e481eed7
+https://www.720yuntu.com/tour/e617e2b05b7643df
+https://www.720yuntu.com/tour/5ea715b90396f2fc
+https://www.720yuntu.com/tour/d9ddcf30ca9a98fe
+https://www.720yuntu.com/tour/d9ddcf30ca9a98fe
+https://www.720yuntu.com/tour/b27d8b7c3d20342c
+https://www.720yuntu.com/tour/b618c932b1a934b2
+https://www.720yuntu.com/tour/e3c5368fdf5fd52f
+https://www.720yuntu.com/tour/97db95eef8db9a3f
+https://www.720yuntu.com/tour/27d6bcf14f23a584
+https://www.720yuntu.com/tour/e4209172028b6670
+https://www.720yuntu.com/tour/dfabca6627223341
+https://www.720yuntu.com/tour/7622850810f3478e
+https://www.720yuntu.com/tour/641a8e3e3d65bf0b
+https://www.720yuntu.com/tour/5ebebdbfe56c8390
+https://www.720yuntu.com/tour/9ac30e4aa6ff3354
+https://www.720yuntu.com/tour/d3059ea6c8c2ceff
+https://www.720yuntu.com/tour/90f4d41979fc9e0c
+https://www.720yuntu.com/tour/f28b6f8080173c87
+https://www.720yuntu.com/tour/a8db589fae773e0d
+https://www.720yuntu.com/tour/75990892c05bb12e
+https://www.720yuntu.com/tour/4ed05f6ccbad7dc7
+https://www.720yuntu.com/tour/3d3ccb8661fce000
+https://www.720yuntu.com/tour/31c84f83ac1a9c65
+https://www.720yuntu.com/tour/f4677f7fc2f11b9f
+https://www.720yuntu.com/tour/1037c4ef87b44379
+https://www.720yuntu.com/tour/6feb7b7e71355827
+https://www.720yuntu.com/tour/24438381b3407478
+https://www.720yuntu.com/tour/c9f68cb779cf90a0
+https://www.720yuntu.com/tour/aaa1b3eaacfa833d
+https://www.720yuntu.com/tour/e17aaf2838b0a11f
+https://www.720yuntu.com/tour/e17aaf2838b0a11f
+https://www.720yuntu.com/tour/7d8cab4aff47fc49
+https://www.720yuntu.com/tour/f6c42df934e57725
+https://www.720yuntu.com/tour/7f89fa5957ee4516
+https://www.720yuntu.com/tour/823f31ace1d03d36
+https://www.720yuntu.com/tour/d0fe234824a16be7
+https://www.720yuntu.com/tour/9f46cfed94cdcfa7
+https://www.720yuntu.com/tour/ae573749527ed261
+https://www.720yuntu.com/tour/30c54cea26932af6
+https://www.720yuntu.com/tour/bbb6ebd9e5adecf4
+https://www.720yuntu.com/tour/4b4a6879d2e90592
+https://www.720yuntu.com/tour/c31e8c1bd32d7cd8
+https://www.720yuntu.com/tour/2ab71c186061070c
+https://www.720yuntu.com/tour/de2cc2bda7abd495
+https://www.720yuntu.com/tour/a375df5d440c0ba0
+https://www.720yuntu.com/tour/32f28ddf5919deb8
+https://www.720yuntu.com/tour/be44a3a22ede8124
+https://www.720yuntu.com/tour/e59df3a88dae6704
+https://www.720yuntu.com/tour/e6519faf34756b9d
+https://www.720yuntu.com/tour/2c97c5feea18b354
+https://www.720yuntu.com/tour/841c03eef4b149d2
+https://www.720yuntu.com/tour/9a5946f2450920c6
+https://www.720yuntu.com/tour/d72be79a94bbbfaa
+https://www.720yuntu.com/tour/a380dfb102e4393c
+https://www.720yuntu.com/tour/715998943fed97ea
+https://www.720yuntu.com/tour/050c8424c989f67a
+https://www.720yuntu.com/tour/7ce64179f71f95b9
+https://www.720yuntu.com/tour/7a4d6085eeb53555
+https://www.720yuntu.com/tour/d913930531950bec
+https://www.720yuntu.com/tour/7fc48b55af73752d
+https://www.720yuntu.com/tour/b8f97a27c5588180
+https://www.720yuntu.com/tour/8d2135a522e4a952
+https://www.720yuntu.com/tour/6997ec4c39b3c301
+https://www.720yuntu.com/tour/a3074c71dfe6f389
+https://www.720yuntu.com/tour/5d8ef80f9d1ede73
+https://www.720yuntu.com/tour/875beee8295df399
+https://www.720yuntu.com/tour/f3b8ec84a0087ff6
+https://www.720yuntu.com/tour/de627fe56d3f7558
+https://www.720yuntu.com/tour/3e2b988524685f0a
+https://www.720yuntu.com/tour/5e66a5e01c712a6a
+https://www.720yuntu.com/tour/7193d5486b0b2e1e
+https://www.720yuntu.com/tour/ee4b80676c987dd0
+https://www.720yuntu.com/tour/5c4e3734f0b5987c
+https://www.720yuntu.com/tour/e8177beb6e912b89
+https://www.720yuntu.com/tour/a307a996d11df968
+https://www.720yuntu.com/tour/91f2c06991c90f7d
+https://www.720yuntu.com/tour/7e70cc7e5f20e821
+https://www.720yuntu.com/tour/3e74648b269396f9
+https://www.720yuntu.com/tour/3c30d496fb2fb2fc
+https://www.720yuntu.com/tour/0f65f607809b5a23
+https://www.720yuntu.com/tour/7def11a604e3db34
+https://www.720yuntu.com/tour/b030ceed0f75598b
+https://www.720yuntu.com/tour/d61762e61ef9a372
+https://www.720yuntu.com/tour/ef6e07fb1c6e1310
+https://www.720yuntu.com/tour/96f1258f3d6e1eec
+https://www.720yuntu.com/tour/43244c323e7d74b5
+https://www.720yuntu.com/tour/9e3e6e36f65c0f44
+https://www.720yuntu.com/tour/9e54ebe85379840c
+https://www.720yuntu.com/tour/daf94e07e006fb78
+https://www.720yuntu.com/tour/be357e3b35894f9e
+https://www.720yuntu.com/tour/e59b59d8621574b9
+https://www.720yuntu.com/tour/330797e668ae93e9
+https://www.720yuntu.com/tour/33f4e90611a47534
+https://www.720yuntu.com/tour/105d1330cf470d52
+https://www.720yuntu.com/tour/e752bc7b53a2afe6
+https://www.720yuntu.com/tour/ab11bc4af6e8076e
+https://www.720yuntu.com/tour/68db277b6a487b44
+https://www.720yuntu.com/tour/d4a3bc4c40c1bf7a
+https://www.720yuntu.com/tour/3ac2d3f77714666c
+https://www.720yun.com/t/eeakuw1lp17?scene_id=130821421
+https://www.720yun.com/t/79akuw1lp1m?scene_id=130821423
+https://www.720yun.com/t/2fakuw1lp1h?scene_id=130821424
+https://www.720yun.com/t/6eakuw1lp1b?scene_id=130821425
+https://www.720yun.com/t/eeakuw1l08l?scene_id=130821426
+https://www.720yun.com/t/fcakuw1l08e?scene_id=130821427
+https://www.720yun.com/t/07akuw1l089?scene_id=130821428
+https://www.720yun.com/t/71akuw1l08y?scene_id=130821429
+https://www.720yun.com/t/b4akuw1l08w?scene_id=130821430
+https://www.720yun.com/t/c7akuw1l087?scene_id=130821431
+https://www.720yun.com/t/fdakuw1l08q?scene_id=130821432
+https://www.720yun.com/t/5eakuw1l08m?scene_id=130821433
+https://www.720yun.com/t/57akuw1l08b?scene_id=130821436
+https://www.720yun.com/t/d5akuw1l07l?scene_id=130821437
+https://www.720yun.com/t/58akuw1l079?scene_id=130821440
+https://www.720yun.com/t/05akuw1l07y?scene_id=130821441
+https://www.720yun.com/t/72akuw1l07w?scene_id=130821442
+https://www.720yun.com/t/11akuw1l07q?scene_id=130821444
+https://www.720yun.com/t/ebakuw1l07m?scene_id=130821445
+https://www.720yun.com/t/ebakuw1l07h?scene_id=130821446
+https://www.720yun.com/t/21akuw1l07b?scene_id=130821447
+https://www.720yun.com/t/16akuw1l0pl?scene_id=130821448
+https://www.720yun.com/t/10akuw1l0pe?scene_id=130821449
+https://www.720yun.com/t/e0akuw1l0p9?scene_id=130821450
+https://www.720yun.com/t/51akuw1l0py?scene_id=130821451
+https://www.720yun.com/t/54akuw1l0pw?scene_id=130821452
+https://www.720yun.com/t/5fakuw1l0p7?scene_id=130821453
+https://www.720yun.com/t/e9akuw1l0pq?scene_id=130821454
+https://www.720yun.com/t/90akuw1l0pm?scene_id=130821455
+https://www.720yun.com/t/b1akuw1l0ph?scene_id=130821456
+https://www.720yun.com/t/71akuw1l0pb?scene_id=130821457
+https://www.720yun.com/t/24akuw1l02l?scene_id=130821458
+https://www.720yun.com/t/84akuw1l02e?scene_id=130821459
+https://www.720yun.com/t/1bakuw1l029?scene_id=130821460
+https://www.720yun.com/t/8eakuw1l02y?scene_id=130821461
+https://www.720yun.com/t/b7akuw1l02w?scene_id=130821462
+https://www.720yun.com/t/26akuw1l027?scene_id=130821463
+https://www.720yun.com/t/e1akuw1l02q?scene_id=130821464
+https://www.720yun.com/t/e1akuw1l02q?scene_id=130821464
+https://www.720yun.com/t/b9akuw1l02m?scene_id=130821465
+https://www.720yun.com/t/ecakuw1l02h?scene_id=130821466
+https://www.720yun.com/t/0eakuw1l02b?scene_id=130821467
+https://www.720yun.com/t/03akuw1l0ql?scene_id=130821468
+https://www.720yun.com/t/2bakuw1l0qe?scene_id=130821469
+https://www.720yun.com/t/b7akuw1l0q9?scene_id=130821470
+https://www.720yun.com/t/21akuw1l0qy?scene_id=130821471
+https://www.720yun.com/t/f2akuw1l0qw?scene_id=130821472
+https://www.720yun.com/t/43akuw1l0q7?scene_id=130821473
+https://www.720yun.com/t/f4akuw1l0qq?scene_id=130821474
+https://www.720yun.com/t/dfakuw1l0qm?scene_id=130821475
+
+https://www.720yuntu.com/tour/a0801093333ad373
+https://www.720yuntu.com/tour/6caefb5b30fbd233
+https://www.720yuntu.com/tour/8337edb1b3d788ec
+https://www.720yuntu.com/tour/bb41f6b0caf01193
+https://www.720yuntu.com/tour/473f007b7eb50347
+https://www.720yuntu.com/tour/35d24d6cc9a74115
+https://www.720yuntu.com/tour/642b4f84736c5fb4
+https://www.720yuntu.com/tour/65dd6e633b995b62
+https://www.720yuntu.com/tour/c28f627a20c09253
+https://www.720yuntu.com/tour/9fcb0303e8942742
+https://www.720yuntu.com/tour/9fcb0303e8942742
+https://www.720yuntu.com/tour/0c761b4a84c56617
+https://www.720yuntu.com/tour/dd7c742204f8e0da
+https://www.720yuntu.com/tour/80d862070b5a8210
+https://www.720yuntu.com/tour/82f254606c9e47ed
+https://www.720yuntu.com/tour/d4cd04b601878804
+https://www.720yuntu.com/tour/fd1b54d021b49666
+https://www.720yuntu.com/tour/c7b44ccbe8672622
+https://www.720yuntu.com/tour/98fd8c4a225e3eb9
+https://www.720yuntu.com/tour/ff7e415a7d03679f
+https://www.720yuntu.com/tour/65286b21087f8286
+https://www.720yuntu.com/tour/cc9bebaa3f00ff59
+https://www.720yuntu.com/tour/1c74249b5dd6661c
+https://www.720yuntu.com/tour/13050e4490b7e1e2
+https://www.720yuntu.com/tour/61c6e78b9ff0990f
+https://www.720yuntu.com/tour/9b03de68892d3efd
+https://www.720yuntu.com/tour/9268f63b355ff1f7
+https://www.720yuntu.com/tour/e559d81bd36d5d60
+https://www.720yuntu.com/tour/065c167fb08c7e70
+https://www.720yuntu.com/tour/652ab8dbb032ed95
+https://www.720yuntu.com/tour/022e90542d629b52
+https://www.720yuntu.com/tour/2f89d9b20da39e4d
+https://www.720yuntu.com/tour/acecf854f02a2549
+https://www.720yuntu.com/tour/298ee8eb808335c2
+https://www.720yuntu.com/tour/0d981bbea48197c7
+https://www.720yuntu.com/tour/a4dccc615461568a
+https://www.720yuntu.com/tour/0c7771f10ce69d83
+https://www.720yuntu.com/tour/e07781024dd32ec2
+https://www.720yuntu.com/tour/0d34eefda6a3961d
+https://www.720yuntu.com/tour/75f45ce9c904aee1
+https://www.720yuntu.com/tour/4dc4bfb1e153228e
+https://www.720yuntu.com/tour/3ab81ff5ed9839e5
+https://www.720yuntu.com/tour/66b8e6f0b8d265f5
+https://www.720yuntu.com/tour/aaffe030c91c5aea
+https://www.720yuntu.com/tour/cc7694f8e5a83f6b
+https://www.720yuntu.com/tour/541c0f608fe73f6f
+https://www.720yuntu.com/tour/973b686d5b428ed6
+https://www.720yuntu.com/tour/b276b6efe506d781
+https://www.720yuntu.com/tour/23a313c4ee9f75b9
+https://www.720yuntu.com/tour/445f95ce9241d4c4
+https://www.720yuntu.com/tour/13e81090f467ed92
+https://www.720yuntu.com/tour/ef34c30f4199725e
+https://www.720yuntu.com/tour/c0517a845f5abad1
+https://www.720yuntu.com/tour/e20029ba72f65913
+
+https://www.lediaocha.com/r/yp1195
+https://www.lediaocha.com/r/7pee2w
+https://www.lediaocha.com/r/qoww80
+https://www.lediaocha.com/r/0ngg04
+https://www.lediaocha.com/r/wwkkon
+https://www.lediaocha.com/r/0ngg00
+https://www.lediaocha.com/r/wwkkov
+https://www.lediaocha.com/r/66qqlv
+https://www.lediaocha.com/r/ln44gk
+https://www.lediaocha.com/r/kg888g
+https://www.lediaocha.com/r/1p111g
+https://www.lediaocha.com/r/r6ooo1
+https://www.lediaocha.com/r/8vpppe
+https://www.lediaocha.com/r/e8kkko
+https://www.lediaocha.com/r/yp111k
+https://www.lediaocha.com/r/7peeez
+https://www.lediaocha.com/r/qowwwn
+https://www.lediaocha.com/r/0nggg0
+https://www.lediaocha.com/r/wwkkkv
+https://www.lediaocha.com/r/66qqqv
+https://www.lediaocha.com/r/ln444k
+https://www.lediaocha.com/r/kg88pg
+https://www.lediaocha.com/r/1p11ng
+https://www.lediaocha.com/r/r6ool1
+https://www.lediaocha.com/r/8vpp9e
+https://www.lediaocha.com/r/e8kk5o
+https://www.lediaocha.com/r/yp11zk
+https://www.lediaocha.com/r/7pee6z
+https://www.lediaocha.com/r/qoww9n
+https://www.lediaocha.com/r/0ngge0
+https://www.lediaocha.com/r/wwkkvv
+https://www.lediaocha.com/r/66qqov
+https://www.lediaocha.com/r/ln440k
+https://www.lediaocha.com/r/kg88yg
+https://www.lediaocha.com/r/1p110g
+https://www.lediaocha.com/r/r6oo91
+https://www.lediaocha.com/r/8vpp2e
+https://www.lediaocha.com/r/e8kkro
+https://www.lediaocha.com/r/yp11rk
+https://www.lediaocha.com/r/7peelz
+https://www.lediaocha.com/r/qoww6n
+https://www.lediaocha.com/r/0nggp0
+https://www.lediaocha.com/r/wwkk1v
+https://www.lediaocha.com/r/66qq9v
+https://www.lediaocha.com/r/ln44pk
+https://www.lediaocha.com/r/kg88mg
+https://www.lediaocha.com/r/1p11lg
+https://www.lediaocha.com/r/r6ook1
+https://www.lediaocha.com/r/8vppze
+https://www.lediaocha.com/r/e8kkeo
+https://www.lediaocha.com/r/yp114k
+https://www.lediaocha.com/r/7peerz
+https://www.lediaocha.com/r/qoww2n
+https://www.lediaocha.com/r/0ngg90
+https://www.lediaocha.com/r/wwkkzv
+https://www.lediaocha.com/r/0ngg99
+https://www.lediaocha.com/r/wwkkz2
+https://www.lediaocha.com/r/66qqk6
+https://www.lediaocha.com/r/ln44y6
+https://www.lediaocha.com/r/kg88n2
+https://www.lediaocha.com/r/1p11ox
+https://www.lediaocha.com/r/r6oow2
+https://www.lediaocha.com/r/8vpp1g
+https://www.lediaocha.com/r/e8kkv0
+https://www.lediaocha.com/r/yp11gn
+https://www.lediaocha.com/r/7peeg2
+https://www.lediaocha.com/r/qowwm9
+https://www.lediaocha.com/r/0nggw9
+https://www.lediaocha.com/r/wwkkq2
+https://www.lediaocha.com/r/66qq46
+https://www.lediaocha.com/r/ln44k6
+https://www.lediaocha.com/r/kg88l2
+https://www.lediaocha.com/r/1p119x
+https://www.lediaocha.com/r/r6oo72
+https://www.lediaocha.com/r/8vpp5g
+https://www.lediaocha.com/r/e8kkn0
+https://www.lediaocha.com/r/yp11vn
+https://www.lediaocha.com/r/7peen2
+https://www.lediaocha.com/r/qowwy9
+https://www.lediaocha.com/r/0nggo9
+https://www.lediaocha.com/r/wwkk22
+https://www.lediaocha.com/r/66qo16
+https://www.lediaocha.com/r/ln4076
+https://www.lediaocha.com/r/kg8p72
+https://www.lediaocha.com/r/1p1n7x
+https://www.lediaocha.com/r/r6olx2
+https://www.lediaocha.com/r/8vp90g
+https://www.lediaocha.com/r/e8k520
+https://www.lediaocha.com/r/yp1z6n
+https://www.lediaocha.com/r/7pe682
+https://www.lediaocha.com/r/qow9x9
+https://www.lediaocha.com/r/0ngel9
+https://www.lediaocha.com/r/wwkvr2
+https://www.lediaocha.com/r/66qo66
+https://www.lediaocha.com/r/ln40n6
+https://www.lediaocha.com/r/kg8pg2
+https://www.lediaocha.com/r/1p1npx
+https://www.lediaocha.com/r/r6ol62
+https://www.lediaocha.com/r/8vp9vg
+https://www.lediaocha.com/r/e8k580
+https://www.lediaocha.com/r/yp1zpn
+https://www.lediaocha.com/r/7pe6p2
+https://www.lediaocha.com/r/qow9o9
+https://www.lediaocha.com/r/0ngen9
+https://www.lediaocha.com/r/wwkvw2
+https://www.lediaocha.com/r/0nge7n
+https://www.lediaocha.com/r/wwkvyp
+https://www.lediaocha.com/r/66qo8e
+https://www.lediaocha.com/r/ln409v
+https://www.lediaocha.com/r/kg8po0
+https://www.lediaocha.com/r/1p1n2w
+https://www.lediaocha.com/r/r6ol80
