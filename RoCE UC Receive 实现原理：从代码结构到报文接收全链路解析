@@ -1,0 +1,387 @@
+在AI集群、分布式存储、高性能计算场景中，RDMA凭借绕开主机CPU协议栈、内存直写的特性，成为低延迟高吞吐通信的基石。RoCE（RDMA over Converged Ethernet）将IB RDMA协议承载在以太网之上，分为RC可靠连接、UC不可靠连接、UD不可靠数据报三种QP类型。其中**UC（Unreliable Connected，不可靠连接）** 是极易被忽视却极具价值的传输形态：它维持点对点固定QP连接，省去RC复杂的序列号重传、ACK确认逻辑，保留连接态路由查找能力，在无损以太网PFC保障下，用极低的控制面开销换取接近硬件极限的吞吐，广泛用于对延迟敏感、网络质量可控的数据中心内部通信。
+
+很多开发者只熟悉RC的收发逻辑，对UC接收链路理解停留在“没有重传”的表层认知。UC接收的核心难点不在于丢包恢复，而在于**网卡硬件报文解析、RQ工作请求匹配、内存地址翻译、DMA落地、CQ完成事件上报**这一整套流水线如何在无可靠传输状态机的前提下高效运转。本文将从UC的核心定义、代码分层结构入手，沿着报文从网线到应用内存的完整链路逐层拆解，同时对比RC差异，剖析硬件卸载、内核驱动、用户态Verbs三者之间的协作逻辑。
+
+## 一、RoCE UC 核心概念：UC QP与RC/UD的本质差异
+QP（Queue Pair，队列对）是RDMA通信的最小单元，包含发送队列SQ、接收队列RQ，QP状态机决定传输语义。
+1. **RC（Reliable Connected）可靠连接**：维护每一条流的PSN序列号、ACK、重传窗口，丢包自动重传，状态机复杂，硬件/驱动开销大；
+2. **UC（Unreliable Connected）不可靠连接**：**点对点固定连接**，QP建立后绑定远端地址向量AV，但是**不维护报文序列号、不做重传、不生成ACK**。报文丢失不会触发任何端侧恢复，依赖底层无损以太网PFC防止链路丢包；
+3. **UD（Unreliable Datagram）不可靠数据报**：无连接，每个报文携带完整GID，每个包独立查找远端地址，单包开销大，适合多对一广播类场景。
+
+UC的Receive接收路径最大特点：**QP上下文预存远端QP信息，报文到达后不需要像UD那样每次解析GID查表，但是不需要RC的PSN校验、乱序重组与ACK生成**。接收端只负责校验报文合法性、匹配RQ的WQE，完成数据DMA写入用户注册内存，生成CQE上报应用。一旦报文在网络丢失，UC接收端不会感知，也不会通知发送端重传。这是理解UC接收全链路的前提。
+
+> 适用场景：无损数据中心内部，PFC保证链路不丢包，业务层自己做容错，追求极致低延迟，例如AI训练内部参数预同步、高吞吐日志流式传输。
+
+## 二、RoCE UC Receive 代码分层结构
+RoCE软件栈分为三层：**用户态Verbs应用层、内核RDMA核心层、网卡硬件驱动层**，接收链路的代码逻辑分布在这三层，每一层各司其职，RQ、CQ、MR、QP对象贯穿整个生命周期。
+
+### 2.1 用户态代码层：应用预投递Recv WQE
+用户态通过`libibverbs`库编写RDMA业务代码，**UC接收的前置操作不是等报文到来，而是提前向RQ投递接收工作请求（Recv WR）**，这是RDMA和Socket最本质的区别。Socket是报文到达后再分配缓冲区；RDMA是**先把内存缓冲区描述符压入RQ，网卡硬件在报文到达时直接使用预先注册好的内存**。
+
+核心数据结构：
+- `ibv_recv_wr`：接收工作请求，描述本次接收的SGE散聚列表、wr_id（用户自定义标记）；
+- `ibv_sge`：Scatter/Gather Element，描述一块内存：虚拟地址addr、长度length、内存密钥lkey；
+- RQ：接收队列，存放一系列Recv WQE（WQE，Work Queue Element工作队列元素）；
+- CQ：完成队列，当接收操作完成，网卡写入CQE（完成队列事件），应用轮询或中断读取CQE。
+
+用户态典型代码逻辑伪代码：
+```c
+// 1. 分配保护域PD，注册内存MR，得到lkey（网卡访问内存的密钥）
+mr = ibv_reg_mr(pd, recv_buf, buf_size, IBV_ACCESS_LOCAL_WRITE);
+
+// 2. 初始化SGE，指向接收缓冲区
+sge.addr = (uint64_t)recv_buf;
+sge.length = buf_size;
+sge.lkey = mr->lkey;
+
+// 3. 构造Recv WR，挂载SGE
+recv_wr.wr_id = 0x1001;
+recv_wr.sg_list = &sge;
+recv_wr.num_sge = 1;
+recv_wr.next = NULL;
+
+// 4. 把Recv WR投递到QP的RQ，Doorbell门铃通知网卡硬件
+ibv_post_recv(qp, &recv_wr, &bad_wr);
+
+// 5. 业务循环轮询CQ，等待接收完成CQE
+while(1) {
+    ibv_poll_cq(cq, 1, &cqe);
+    if(cqe->status == IBV_WC_SUCCESS) {
+        // 接收成功，读取recv_buf中的数据
+    }
+}
+```
+`ibv_post_recv`是用户态入口：将Recv WR封装，通过Doorbell机制通知网卡，网卡把WQE加载到硬件RQ环形缓冲区。**UC和RC在`ibv_post_recv`用户态API完全一致，差异在硬件驱动处理报文的逻辑**。
+
+### 2.2 内核RDMA核心层：资源管理、QP状态校验、地址翻译
+内核`rdma_core`作为用户态与硬件驱动之间的中间层，负责：
+1. 校验用户态传入参数，校验MR内存合法性，锁定物理内存，防止页面换出；
+2. 管理QP生命周期：UC QP从INIT→RTR（Ready To Receive，接收就绪）状态转换，RTR阶段填入远端AV地址向量（GID、QP编号）；
+3. 封装硬件抽象接口，向上统一Verbs接口，向下调用厂商驱动（Mellanox、RXE SoftRoCE等）；
+4. 对RXE（SoftRoCE软件RoCE），内核同时承担报文收发、协议解析；硬件网卡则把协议解析卸载到NIC。
+
+UC QP进入RTR状态是接收报文的前提：只有RTR状态下，网卡才会接收属于该QP的报文。UC QP在RTR阶段绑定远端QP和GID，后续报文到达直接匹配QP编号，不需要像UD包那样查找GID映射表。
+
+### 2.3 网卡驱动与硬件代码层：报文解析、RQ匹配、DMA、CQE写入
+硬件/驱动代码是UC接收链路的核心差异点。硬件网卡（如ConnectX系列）把RoCE报文解析、BTH头解析、QP查找、内存翻译、DMA全部硬件卸载；而RXE软件RoCE在Linux内核用CPU模拟整个RoCE报文处理流水线。
+
+硬件接收模块核心子模块：
+- 报文解析引擎：解析二层以太网头、IP头、UDP头（RoCEv2 UDP目的端口固定4791）、IB BTH基础传输头；
+- QP查找引擎：使用BTH中的目标QP号，查找硬件QP上下文；
+- RQ WQE选择器：从QP对应的RQ环形队列取出**下一个可用Recv WQE**；
+- MR地址翻译引擎：利用WQE携带的lkey，查找内存映射表，将用户虚拟地址转换为物理地址；
+- DMA引擎：直接把报文payload写入主机物理内存，**全程不经过主机CPU拷贝**；
+- CQ写入引擎：接收完成后，构造CQE写入主机CQ环形缓冲区，触发中断或等待用户轮询。
+
+> UC驱动侧代码和RC最大区别：RC驱动硬件会校验PSN序列号、维护接收状态机、生成ACK包；UC硬件直接跳过PSN校验、无ACK生成逻辑，报文合法就执行RQ匹配+DMA，极大减少硬件逻辑开销。
+
+## 三、RoCE UC Receive 报文格式：RoCEv2报文头部栈
+RoCEv2报文从外到内的头部栈：以太网头 → IPv4/IPv6头 → UDP头 → IB BTH（Base Transport Header）→ 可选扩展头 → RDMA Payload → ICRC完整性校验码。
+BTH是RDMA传输的核心头部，关键字段：
+- Opcode：操作码，区分SEND、WRITE、READ等操作；UC接收最常见是SEND报文；
+- DQP（Destination QP）：目标QP编号，网卡用来快速查找QP上下文；
+- PSN：序列号。**UC报文虽然携带PSN字段，但UC接收硬件直接忽略此字段，不做校验、不做乱序缓存**；RC则严格校验PSN，做丢包、乱序判断。
+
+ICRC是报文完整性校验，接收端硬件自动校验，如果校验失败，直接丢弃报文，UC不会通知上层。
+
+## 四、UC Receive 报文接收全链路：从网线到应用内存
+我们跟随一个UC SEND报文，完整走一遍接收流水线，一共7个阶段，直观理解数据流转。
+
+### 阶段1：报文到达网卡PHY，进入网卡接收FIFO缓冲区
+报文从对端服务器网卡发出，经过无损以太网交换机（PFC保证链路不丢包）到达接收服务器网卡PHY层，转换成电信号，存入网卡片上内部接收FIFO。网卡硬件做二层MAC匹配，过滤不属于本机MAC的报文。
+
+### 阶段2：硬件逐层解析报文头部，提取DQP，查找QP上下文
+硬件解析引擎依次剥离以太网头、IP、UDP头，校验UDP目的端口4791，取出BTH头部。
+读取BTH中的DQP（目标QP号），在硬件QP上下文表查找对应的UC QP：
+1. 如果QP不存在，或者QP状态不是RTR，直接丢弃报文；
+2. 如果QP是UC类型，加载QP上下文，上下文里面预存远端AV信息；
+> RC此时会读取PSN，和本机QP维护的接收PSN窗口对比，判断是否重复/乱序；UC直接跳过PSN校验，只校验BTH opcode、ICRC校验码。
+
+### 阶段3：匹配RQ，取出预投递的Recv WQE
+QP找到后，网卡定位该QP绑定的RQ环形队列，取出RQ队列头部的**未被使用的Recv WQE**。
+> 关键点：RDMA是“预投递模型”。如果RQ为空（没有提前Post Recv），报文到达后没有可用WQE存放数据，报文直接丢弃。这是RDMA开发最常见的踩坑点。
+
+WQE携带SGE数组，SGE描述一块或多块接收内存缓冲区，包含虚拟地址、长度、lkey。网卡通过lkey查询硬件MR翻译表，把用户态虚拟地址转换成主机物理地址，**这个翻译过程在网卡硬件完成，不占用CPU**。
+
+### 阶段4：DMA payload直写主机内存
+网卡DMA引擎直接把报文的RDMA payload，通过PCIe总线写入SGE描述的主机物理内存。
+如果SGE是多段散聚列表，硬件自动做Scatter/Gather，把连续报文payload分散写入多块非连续内存，全程不需要主机CPU参与数据拷贝。
+> 传统TCP：网卡把数据拷贝到内核skb，CPU再拷贝到用户态buffer；RDMA UC：网卡直接写用户态注册内存，两次内存拷贝全部消除，这就是RDMA低延迟的根源。
+
+### 阶段5：校验ICRC，完成接收操作
+数据DMA写入内存之后，硬件校验报文ICRC完整性校验值。
+- ICRC校验失败：丢弃报文，不生成CQE，应用程序完全感知不到这个报文；
+- ICRC校验成功：标记本次Recv WQE处理完成，推进RQ的环形队列指针，释放该WQE。
+
+> RC此时还要更新接收PSN、判断是否需要回复ACK报文；UC没有这个步骤，到此报文数据落地完成。
+
+### 阶段6：硬件生成CQE，写入完成队列CQ
+网卡构造CQE（Completion Queue Element），写入CQ环形缓冲区。CQE包含wr_id（用户投递Recv WR时设置的标记）、WC状态、接收字节长度、QP编号等信息。
+写入CQE之后有两种通知应用的方式：
+1. 中断模式：网卡触发PCIe中断，唤醒阻塞在`ibv_poll_cq`的应用线程；
+2. 轮询模式（业务常用）：应用CPU持续轮询CQ内存，读取CQE，没有中断开销，延迟更低，高性能场景首选。
+
+### 阶段7：应用层Poll CQ，读取接收数据
+应用调用`ibv_poll_cq`读取CQE，判断WC状态为成功后，就可以直接访问之前注册的`recv_buf`内存，数据已经就绪。处理完成后，业务一般会再次调用`ibv_post_recv`投递新的Recv WQE，补充RQ缓冲区，等待下一个报文到达，形成循环。
+
+## 五、UC接收链路的关键特性与常见误区
+### 5.1 UC的“不可靠”到底意味着什么
+UC的不可靠只体现在**端侧传输层无重传机制**。如果交换机PFC正常工作，链路不会丢包，UC可以做到近乎无损传输；一旦网络拥塞导致丢包，UC接收端不会检测丢包，不会发送任何反馈，发送端也不会重试。业务层需要自己实现消息重传、超时检测，这和TCP完全不同。
+
+### 5.2 UC与RC接收链路性能差异
+RC接收端硬件必须维护PSN状态机、检查序列号、生成ACK报文，占用硬件资源；UC去掉了这部分逻辑，硬件流水线更短，单报文处理延迟更低，同等硬件下UC可以达到更高的包吞吐。代价是丢失了端到端可靠保障。
+
+### 5.3 常见开发误区
+1. 误区：UC不需要Post Recv。错！UC和RC一样，**必须提前投递Recv WQE到RQ**，RQ空则报文直接丢弃；
+2. 误区：UC报文不带PSN。错！报文BTH里面依然携带PSN，只是UC硬件接收逻辑直接忽略，不校验；
+3. 误区：UC不能在有损网络使用。UC设计依赖无损以太网PFC；有损网络下丢包会静默丢失消息，业务很难排查。
+
+## 六、RXE软件RoCE下UC Receive的特殊实现
+硬件网卡把接收流水线全部卸载；RXE（SoftRoCE）是纯软件实现RoCE，所有报文接收逻辑跑在内核CPU上，代码路径更直观。
+RXE的UC接收流程：网卡收到UDP报文，内核协议栈将UDP payload交给RXE模块；RXE软件解析BTH头，查找UC QP，在内核软件RQ链表查找Recv WQE，内核CPU完成地址翻译，使用CPU拷贝将payload复制到用户注册内存，最后构造CQE。
+RXE适合调试RoCE协议，但性能远低于硬件卸载网卡，CPU开销高，一般仅用于开发验证。
+
+## 七、UC Receive 链路故障排查思路
+当UC接收异常、收不到报文，沿着全链路反向定位：
+1. 检查QP状态：是否成功进入RTR接收就绪状态；
+2. 检查RQ：确认`ibv_post_recv`成功投递足够数量WQE，RQ不耗尽；
+3. 网络层：检查PFC配置，确认无损网络，是否存在报文丢包；
+4. 报文校验：抓包查看RoCE报文BTH DQP、ICRC是否正确；
+5. CQ：检查CQ队列长度，CQ溢出会导致CQE丢失，应用看不到完成事件；
+6. MR内存：确认内存注册成功，lkey有效，内存没有被释放。
+
+## 总结
+RoCE UC Receive的魅力，在于它剥离了RC沉重的可靠传输状态机，保留RDMA核心的内存直写、预投递WQE、硬件卸载能力。UC接收全链路本质是：**应用提前向RQ投递缓冲区描述符 → 报文抵达网卡硬件 → 硬件解析头部匹配UC QP → 取出RQ的WQE，DMA直写主机内存 → 生成CQE通知应用**。整个过程没有PSN校验，没有ACK，没有重传，换取更低延迟与更高吞吐。
+
+UC不是RC的替代品，而是数据中心无损网络下的轻量化选择。理解UC接收链路，不仅能看懂RDMA代码结构，更能帮助我们在AI集群、分布式存储架构中，根据业务可靠性需求，合理在RC、UC之间做取舍，最大化释放RoCE网络硬件性能。在大规模高性能集群设计中，UC这套极简接收流水线，正在成为追求极致延迟场景下的重要技术方案。
+
+
+
+
+
+
+https://vr.justeasy.cn/view/17x919059iw4r8r3-1791905998.html
+https://vr.justeasy.cn/view/17z29190601y5zr2-1791906070.html
+https://vr.justeasy.cn/view/1k7a91909w61o2l3-1791906140.html
+https://vr.justeasy.cn/view/vcg1791906sp1724-1791906191.html
+https://vr.justeasy.cn/view/ow16791906b02f25-1791906242.html
+https://vr.justeasy.cn/view/179pr19c0y6279x6-1791906293.html
+https://vr.justeasy.cn/view/17d9k190963xrl28-1791906345.html
+https://vr.justeasy.cn/view/w17gq91940763799-1791906396.html
+https://vr.justeasy.cn/view/b17p92c1906ik430-1791906447.html
+https://vr.justeasy.cn/view/u1w1791p906k48w1-1791906499.html
+https://vr.justeasy.cn/view/17914yxr90653y33-1791906550.html
+https://vr.justeasy.cn/view/17i919oek0z65484-1791906602.html
+https://vr.justeasy.cn/view/p179ht1940b66t36-1791906653.html
+https://vr.justeasy.cn/view/1z791970i6amr687-1791906708.html
+https://vr.justeasy.cn/view/1057r9gr19067432-1791906753.html
+https://vr.justeasy.cn/view/w179b1906plq7t87-1791906799.html
+https://vr.justeasy.cn/view/17919096pc8c93q2-1791906844.html
+https://vr.justeasy.cn/view/er157919046f8878-1791906889.html
+https://vr.justeasy.cn/view/1x791l978jp06923-1791906935.html
+https://vr.justeasy.cn/view/m179lv19j069a6j9-1791906981.html
+https://vr.justeasy.cn/view/17ee49z1l90701s5-1791907026.html
+https://vr.justeasy.cn/view/yv17791t90u77060-1791907072.html
+https://vr.justeasy.cn/view/179n19e80gz71056-1791907117.html
+https://vr.justeasy.cn/view/d17919c07q16s151-1791907163.html
+https://vr.justeasy.cn/view/1739190yp67819o7-1791907210.html
+https://vr.justeasy.cn/view/117o9r1907724ch4-1791907256.html
+https://vr.justeasy.cn/view/172g9vn159072990-1791907301.html
+https://vr.justeasy.cn/view/e17914890re733q6-1791907347.html
+https://vr.justeasy.cn/view/17459190i5q738c1-1791907393.html
+https://vr.justeasy.cn/view/179afh1b9074on26-1791907438.html
+https://vr.justeasy.cn/view/wq17jeh9190p7472-1791907483.html
+https://vr.justeasy.cn/view/17rj9r1907wu5j17-1791907529.html
+https://vr.justeasy.cn/view/179i195067i560l3-1791907575.html
+https://vr.justeasy.cn/view/7179s19n07k620i8-1791907619.html
+https://vr.justeasy.cn/view/a18796190y7os653-1791907665.html
+https://vr.justeasy.cn/view/21g79190x7m69ph9-1791907711.html
+https://vr.justeasy.cn/view/1g7kd9193077v444-1791907756.html
+https://vr.justeasy.cn/view/107918790tm77691-1791907803.html
+https://vr.justeasy.cn/view/j06y1791907h3837-1791907849.html
+https://vr.justeasy.cn/view/179190k7088486z3-1791907894.html
+https://vr.justeasy.cn/view/17py91a6907ss928-1791907939.html
+https://vr.justeasy.cn/view/179199n0rm7917w4-1791907986.html
+https://vr.justeasy.cn/view/17y9lj1690383020-1791908031.html
+https://vr.justeasy.cn/view/1796n91905a80d65-1791908077.html
+https://vr.justeasy.cn/view/s01a7919nd08p111-1791908122.html
+https://vr.justeasy.cn/view/a1x7h919008b15j7-1791908168.html
+https://vr.justeasy.cn/view/17fcx919i082p002-1791908214.html
+https://vr.justeasy.cn/view/u179a19n30j82408-1791908259.html
+https://vr.justeasy.cn/compose
+https://vr.justeasy.cn/view/17919o098f3i3rz8-1791908353.html
+https://vr.justeasy.cn/view/c1o179b19y085387-1791908399.html
+https://vr.justeasy.cn/view/1k79196vj05i8432-1791908447.html
+https://vr.justeasy.cn/view/1791u908w4rotf81-1791908492.html
+https://vr.justeasy.cn/view/19791n90o85zu826-1791908537.html
+https://vr.justeasy.cn/view/17f9190885x07ra1-1791908582.html
+https://vr.justeasy.cn/view/t1p97yc919d08616-1791908628.html
+https://vr.justeasy.cn/view/4w1791y90m8x6w62-1791908673.html
+https://vr.justeasy.cn/view/5y1791s90c8770b7-1791908719.html
+https://vr.justeasy.cn/view/t1y79192owz08752-1791908764.html
+https://vr.justeasy.cn/view/c1q791ql9u0n8797-1791908809.html
+https://vr.justeasy.cn/view/17qe9rs1p908v842-1791908854.html
+https://vr.justeasy.cn/view/17r79y1908z694v9-1791908961.html
+https://vr.justeasy.cn/view/l17z9190608dt994-1791909033.html
+https://vr.justeasy.cn/view/17g91w9090mv6426-1791909075.html
+https://vr.justeasy.cn/view/179311590ua91b08-1791909118.html
+https://vr.justeasy.cn/view/17c919s0k9q17o51-1791909160.html
+https://vr.justeasy.cn/view/177b9189l0919203-1791909202.html
+https://vr.justeasy.cn/view/14179b719092x3u4-1791909243.html
+https://vr.justeasy.cn/view/f1b7n910ia909276-1791909286.html
+https://vr.justeasy.cn/view/93z179190931yhj9-1791909329.html
+https://vr.justeasy.cn/view/171914909n030i61-1791909371.html
+https://vr.justeasy.cn/view/1n7919800x9f40v4-1791909413.html
+https://vr.justeasy.cn/view/17919094pw1dg4h6-1791909456.html
+https://vr.justeasy.cn/view/to17g9h1yq909488-1791909498.html
+https://vr.justeasy.cn/view/s176h9m1gf909531-1791909540.html
+https://vr.justeasy.cn/view/1b79f1909x075733-1791909583.html
+https://vr.justeasy.cn/view/1i7912f9096hl1k6-1791909626.html
+https://vr.justeasy.cn/view/1ha79wj1901965t8-1791909668.html
+https://vr.justeasy.cn/view/179190jyw99o6701-1791909710.html
+https://vr.justeasy.cn/view/l21576919d097c43-1791909775.html
+https://vr.justeasy.cn/view/17859b3138909808-1791909819.html
+https://vr.justeasy.cn/view/17191yy9fz098552-1791909864.html
+https://vr.justeasy.cn/view/147xjn9p19009897-1791909908.html
+https://vr.justeasy.cn/view/179p19099idmr5n2-1791909964.html
+https://vr.justeasy.cn/view/17m951904g99iu96-1791910008.html
+https://vr.justeasy.cn/view/a17s391b9pj10039-1791910051.html
+https://vr.justeasy.cn/view/173919631320s082-1791910094.html
+https://vr.justeasy.cn/view/hr1yg73h91910125-1791910137.html
+https://vr.justeasy.cn/view/17v919106zk1m068-1791910180.html
+https://vr.justeasy.cn/view/17917qksc9t10212-1791910224.html
+https://vr.justeasy.cn/view/179619bmx15z0256-1791910268.html
+https://vr.justeasy.cn/view/qk771791091030s0-1791910311.html
+https://vr.justeasy.cn/view/1791c911uznd0343-1791910355.html
+https://vr.justeasy.cn/view/i17w9919oz130386-1791910398.html
+https://vr.justeasy.cn/view/t1j79kgo1910s430-1791910441.html
+https://vr.justeasy.cn/view/1l7951m918h01473-1791910484.html
+https://vr.justeasy.cn/view/p17491991jci0517-1791910529.html
+https://vr.justeasy.cn/view/1f1793191905a6t0-1791910572.html
+https://vr.justeasy.cn/view/177919bgcu106404-1791910616.html
+https://vr.justeasy.cn/view/ryr17y9d191064i7-1791910659.html
+https://vr.justeasy.cn/view/17p91o691qx90691-1791910703.html
+https://vr.justeasy.cn/view/17919j1160kbz735-1791910746.html
+https://vr.justeasy.cn/view/16a27i919by10778-1791910790.html
+https://vr.justeasy.cn/view/17091910nor8r285-1791910837.html
+https://vr.justeasy.cn/view/1n7o7h6919610868-1791910880.html
+https://vr.justeasy.cn/view/179vww191091g4x1-1791910923.html
+https://vr.justeasy.cn/view/173o9cj91u910954-1791910965.html
+https://vr.justeasy.cn/view/17v9h191hz0oc997-1791911008.html
+https://vr.justeasy.cn/view/1k8vp79191wt1091-1791911103.html
+https://vr.justeasy.cn/view/1p7d9191911oyo35-1791911146.html
+https://vr.justeasy.cn/view/17d791ohx9101178-1791911190.html
+https://vr.justeasy.cn/view/m179z19m11xo22m2-1791911233.html
+https://vr.justeasy.cn/view/1p791iz9l11w2365-1791911277.html
+https://vr.justeasy.cn/view/ahy1ff79191c1308-1791911319.html
+https://vr.justeasy.cn/view/17y91vb91x1r3511-1791911362.html
+https://vk.ru/topic-233021751_69529164
+https://vk.ru/topic-233021751_69529165
+https://vk.ru/topic-233021751_69529166
+https://vk.ru/topic-233021751_69529168
+https://vk.ru/topic-233021751_69529177
+https://vk.ru/topic-233021751_69529179
+https://vk.ru/topic-233021751_69529185
+https://vk.ru/topic-233021751_69529186
+https://vk.ru/topic-233021751_69529188
+https://vk.ru/topic-233021751_69529189
+https://vk.ru/topic-233021751_69529195
+https://vk.ru/topic-233021751_69529198
+https://vk.ru/topic-233021751_69529200
+https://vk.ru/topic-233021751_69529202
+https://vk.ru/topic-233021751_69529204
+https://vk.ru/topic-233021751_69529212
+https://vk.ru/topic-233021751_69529213
+https://vk.ru/topic-233021751_69529214
+https://vk.ru/topic-233021751_69529215
+https://vk.ru/topic-233021751_69529216
+https://vk.ru/topic-233021751_69529224
+https://vk.ru/topic-233021751_69529225
+https://vk.ru/topic-233021751_69529226
+https://vk.ru/topic-233021751_69529228
+https://vk.ru/topic-233021751_69529229
+https://vk.ru/topic-233021751_69529230
+https://vk.ru/topic-233021751_69529231
+https://vk.ru/topic-233021751_69529232
+https://vk.ru/topic-233021751_69529233
+https://vk.ru/topic-233021751_69529234
+https://vk.ru/topic-233021751_69529235
+https://vk.ru/topic-233021751_69529236
+https://vk.ru/topic-233021751_69529237
+https://vk.ru/topic-233021751_69529238
+https://vk.ru/topic-233021751_69529239
+https://vk.ru/topic-233021751_69529241
+https://vk.ru/topic-233021751_69529244
+https://vk.ru/topic-233021751_69529246
+https://vk.ru/topic-233021751_69529248
+https://vk.ru/topic-233021751_69529249
+https://vk.ru/topic-233021751_69529250
+https://vk.ru/topic-233021751_69529251
+https://vk.ru/topic-233021751_69529252
+https://vk.ru/topic-233021751_69529253
+https://vk.ru/topic-233021751_69529255
+https://vk.ru/topic-233021751_69529256
+https://vk.ru/topic-233021751_69529257
+https://vk.ru/topic-233021751_69529258
+https://vk.ru/topic-233021751_69529259
+https://vk.ru/topic-233021751_69529260
+https://vk.ru/topic-233021751_69529261
+https://vk.ru/topic-233021751_69529264
+https://vk.ru/topic-233021751_69529266
+https://vk.ru/topic-233021751_69529272
+https://vk.ru/topic-233021751_69529274
+https://vk.ru/topic-233021751_69529276
+https://vk.ru/topic-233021751_69529278
+https://vk.ru/topic-233021751_69529284
+https://vk.ru/topic-233021751_69529289
+https://vk.ru/topic-233021751_69529291
+https://vk.ru/topic-233021751_69529300
+https://vk.ru/topic-233021751_69529303
+https://vk.ru/topic-233021751_69529304
+https://vk.ru/topic-233021751_69529306
+https://vk.ru/topic-233021751_69529313
+https://vk.ru/topic-233021751_69529316
+https://vk.ru/topic-233021751_69529318
+https://vk.ru/topic-233021751_69529323
+https://vk.ru/topic-233021751_69529325
+https://vk.ru/topic-233021751_69529327
+https://vk.ru/topic-233021751_69529330
+https://vk.ru/topic-233021751_69529332
+https://vk.ru/topic-233021751_69529333
+https://vk.ru/topic-233021751_69529334
+https://vk.ru/topic-233021751_69529335
+https://vk.ru/topic-233021751_69529337
+https://vk.ru/topic-233021751_69529339
+https://vk.ru/topic-233021751_69529342
+https://vk.ru/topic-233021751_69529344
+https://vk.ru/topic-233021751_69529345
+https://vk.ru/topic-233021751_69529347
+https://vk.ru/topic-233021751_69529351
+https://vk.ru/topic-233021751_69529353
+https://vk.ru/topic-233021751_69529354
+https://vk.ru/topic-233021751_69529356
+https://vk.ru/topic-233021751_69529357
+https://vk.ru/topic-233021751_69529359
+https://vk.ru/topic-233021751_69529360
+https://vk.ru/topic-233021751_69529362
+https://vk.ru/topic-233021751_69529364
+https://vk.ru/topic-233021751_69529368
+https://vk.ru/topic-233021751_69529376
+https://vk.ru/topic-233021751_69529378
+https://vk.ru/topic-233021751_69529381
+https://vk.ru/topic-233021751_69529383
+https://vk.ru/topic-233021751_69529385
+https://vk.ru/topic-233021751_69529386
+https://vk.ru/topic-233021751_69529388
+https://vk.ru/topic-233021751_69529389
+https://vk.ru/topic-233021751_69529390
+https://vk.ru/topic-233021751_69529393
+https://vk.ru/topic-233021751_69529398
+https://vk.ru/topic-233021751_69529404
+https://vk.ru/topic-233021751_69529405
+https://vk.ru/topic-233021751_69529414
+https://vk.ru/topic-233021751_69529416
+https://vk.ru/topic-233021751_69529417
+https://vk.ru/topic-233021751_69529425
+https://vk.ru/topic-233021751_69529429
+
