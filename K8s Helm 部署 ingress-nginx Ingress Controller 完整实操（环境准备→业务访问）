@@ -1,0 +1,866 @@
+# K8s Helm 部署 ingress-nginx Ingress Controller 完整实操（环境准备→业务访问）
+
+> 
+> 说明：本文使用 **ingress-nginx（社区Nginx Ingress控制器）**，不是NGINX官方商业版；区分：**Ingress资源是路由规则，Ingress Controller才是真正的反向代理Pod**，必须先部署控制器，Ingress规则才能生效。
+> 集群环境：Kubernetes 1.24+，Helm 3，自建K8s/云厂商集群均可；自建集群Service默认只能用NodePort，云厂商可以LoadBalancer。
+
+## 一、环境准备
+
+### 1. 前置检查
+
+```
+# 1. 确认kubectl连通集群
+kubectl get nodes
+
+# 2. 确认helm版本（必须helm3，helm2废弃）
+helm version
+```
+
+要求：
+
+- K8s集群正常，节点Ready
+- Helm3已安装
+- 集群网络插件正常（Calico/Flannel）
+- 可以拉取镜像（国内环境提前准备镜像加速，否则ingress镜像拉取超时）
+
+### 2. 添加 ingress-nginx Helm仓库
+
+```
+# 添加仓库
+helm repo add ingress-nginx [https://kubernetes.github.io/ingress-nginx](https://kubernetes.github.io/ingress-nginx)
+
+# 更新仓库索引
+helm repo update
+
+# 搜索chart
+helm search repo ingress-nginx
+```
+
+> 
+> 国内网络访问github.io缓慢：可以使用镜像仓库或者提前helm pull下载包离线安装
+
+## 二、Helm 安装 ingress-nginx 控制器
+
+### 方式1：极简安装（快速测试）
+
+```
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --repo [https://kubernetes.github.io/ingress-nginx](https://kubernetes.github.io/ingress-nginx) \
+  --namespace ingress-nginx --create-namespace
+```
+
+- `upgrade --install`：幂等命令，不存在则安装，存在则升级
+- `--create-namespace`：自动创建`ingress-nginx`命名空间
+
+### 方式2：自定义参数安装（推荐生产，可导出values.yaml微调）
+
+```
+# 导出默认配置文件，修改后安装
+helm show values ingress-nginx/ingress-nginx --repo [https://kubernetes.github.io/ingress-nginx](https://kubernetes.github.io/ingress-nginx) > values.yaml
+
+# 编辑values.yaml，常见修改点
+# controller.replicaCount=2 副本数
+# controller.service.type：自建集群用NodePort；公有云用LoadBalancer
+# resources 资源限制、nodeSelector、tolerations污点容忍
+
+# 使用自定义values安装
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --repo [https://kubernetes.github.io/ingress-nginx](https://kubernetes.github.io/ingress-nginx) \
+  --namespace ingress-nginx --create-namespace \
+  -f values.yaml
+```
+
+> 
+> 自建物理机/虚拟机集群：`controller.service.type=NodePort`
+> 公有云EKS/ACK/AKS：`controller.service.type=LoadBalancer`，云厂商自动分配公网IP
+
+## 三、验证 ingress-nginx 控制器部署状态
+
+```
+# 查看命名空间下Pod
+kubectl get pods -n ingress-nginx -w
+
+# 查看Service
+kubectl get svc -n ingress-nginx
+```
+
+输出示例（自建集群NodePort）：
+
+```
+NAME                                 TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+ingress-nginx-controller             NodePort    10.96.xxx.xxx   <none>        80:30080/TCP,443:30443/TCP   2m
+ingress-nginx-controller-admission   ClusterIP   10.96.xxx.xxx   <none>        443/TCP                      2m
+```
+
+- Pod状态必须是`Running`；镜像拉取慢会处于ContainerCreating，耐心等待或换国内镜像
+- 记录：**NodePort端口 80→30080，443→30443**，后续外部访问节点IP+该端口
+
+查看helm发布：
+
+```
+helm list -n ingress-nginx
+```
+
+### 查看控制器日志（排错用）
+
+```
+kubectl logs -f deployment/ingress-nginx-controller -n ingress-nginx
+```
+
+## 四、部署测试业务（Deployment + ClusterIP Service）
+
+准备`demo-app.yaml`，创建一个简单nginx业务：
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-nginx
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-nginx
+  template:
+    metadata:
+      labels:
+        app: demo-nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-nginx-svc
+  namespace: default
+spec:
+  selector:
+    app: demo-nginx
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP
+```
+
+应用资源：
+
+```
+kubectl apply -f demo-app.yaml
+
+# 验证
+kubectl get deploy,pod,svc
+```
+
+> 
+> Service类型ClusterIP，**只能集群内部访问，外部不能直接访问**，需要Ingress做七层路由。
+
+## 五、创建 Ingress 路由规则（核心）
+
+> 
+> 重点：K8s 1.19+ 使用 `networking.k8s.io/v1` API（不再是v1beta1）
+> 新建 `ingress-demo.yaml`
+
+```
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+  namespace: default
+  annotations:
+    # 指定使用 ingress-nginx 控制器（多Ingress控制器场景必须加）
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  rules:
+  - host: demo.k8s.local  # 域名，自行修改
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: demo-nginx-svc
+            port:
+              number: 80
+```
+
+创建Ingress资源：
+
+```
+kubectl apply -f ingress-demo.yaml
+
+# 查看Ingress
+kubectl get ingress
+```
+
+输出：
+
+```
+NAME          CLASS    HOSTS           ADDRESS   PORTS   AGE
+demo-ingress  nginx    demo.k8s.local            80      30s
+```
+
+> 
+> 等待片刻，`ADDRESS`字段会填充Ingress Controller Service的IP（云厂商LB IP / 节点IP）
+
+## 六、域名解析配置 & 业务访问
+
+### 场景A：自建K8s集群（NodePort模式）
+
+1. 本地`/etc/hosts`（Linux/Mac）或 `C:\Windows\System32\drivers\etc\hosts` 添加解析：
+
+```
+# 节点IP      域名
+192.168.1.100 demo.k8s.local
+```
+
+> 
+> `192.168.1.100`：任意一个K8s工作节点IP
+
+2. 浏览器/ curl访问：
+
+```
+curl [http://demo.k8s.local:30080](http://demo.k8s.local:30080)
+```
+
+> 
+> 原理：流量 → 节点IP:30080 → ingress-nginx-controller Pod → 根据host路由转发到demo-nginx-svc → 后端Pod
+
+### 场景B：公有云LoadBalancer模式
+
+Ingress Controller Service会拿到公网IP，直接把域名`demo.k8s.local`DNS解析到LB公网IP，直接访问标准80端口：
+
+```
+curl [http://demo.k8s.local](http://demo.k8s.local)
+```
+
+## 七、HTTPS TLS 配置（可选）
+
+1. 生成证书secret：
+
+```
+# 自签名证书测试，生产使用可信CA证书
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=demo.k8s.local"
+kubectl create secret tls demo-tls --cert=tls.crt --key=tls.key
+```
+
+2. 修改Ingress，增加tls配置：
+
+```
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  tls:
+  - hosts:
+    - demo.k8s.local
+    secretName: demo-tls
+  rules:
+  - host: demo.k8s.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: demo-nginx-svc
+            port:
+              number: 80
+```
+
+应用后访问 `[https://demo.k8s.local](https://demo.k8s.local)`
+
+## 八、常见排错清单
+
+1. Ingress ADDRESS一直为空：Ingress Controller Pod没正常运行；检查Pod日志
+2. 访问404：host域名不匹配、path写错、backend service名称/端口错误
+3. 访问连接超时：安全组/防火墙没有放行NodePort/LB端口；自建集群节点防火墙
+4. 403：nginx权限问题，业务镜像问题
+5. 多Ingress控制器：必须指定`ingress.class`，否则路由不生效
+6. 镜像拉取失败：国内环境替换values.yaml里controller镜像为国内镜像地址
+
+## 九、卸载（清理环境）
+
+```
+# 删除ingress路由、业务
+kubectl delete -f ingress-demo.yaml
+kubectl delete -f demo-app.yaml
+
+# helm卸载ingress控制器
+helm uninstall ingress-nginx -n ingress-nginx
+
+# 删除命名空间
+kubectl delete ns ingress-nginx
+```
+
+
+
+
+
+https://www.720yuntu.com/tour/a8d01899836a8849
+https://www.720yuntu.com/tour/e6a5e006c059eaf3
+https://www.720yuntu.com/tour/a6f40404ee32562e
+https://www.720yuntu.com/tour/7951d2763e0158cb
+https://www.720yuntu.com/tour/8c5a1c336bf20748
+https://www.720yuntu.com/tour/63a86e7ad333b3f4
+https://www.720yuntu.com/tour/ee1a9018c04efdea
+https://www.720yuntu.com/tour/9b3ea5bb2ead6b41
+https://www.720yuntu.com/tour/4661d322b81817b9
+https://www.720yuntu.com/tour/40218346f79baa0a
+https://www.720yuntu.com/tour/a40703431940dfe2
+https://www.720yuntu.com/tour/38fd39b1ef7cdaf2
+https://www.720yuntu.com/tour/040580e5887ace60
+https://www.720yuntu.com/tour/a8827c08e37ccc6f
+https://www.720yuntu.com/tour/66e52dfd20fa7a8a
+https://www.720yuntu.com/tour/c683196aaed6c056
+https://www.720yuntu.com/tour/9e9e99ce3c4f3f80
+https://www.720yuntu.com/tour/570fb6ad4c18199e
+https://www.720yuntu.com/tour/263e49737f047328
+https://www.720yuntu.com/tour/c0b44d1098111f83
+https://www.720yuntu.com/tour/52a8435b8fde7391
+https://www.720yuntu.com/tour/07007b96f00b95e7
+https://www.720yuntu.com/tour/d5ab5e447c520f1e
+https://www.720yuntu.com/tour/7d4825431ebe7287
+https://www.720yuntu.com/tour/73fef7a121035715
+https://www.720yuntu.com/author?pk=131389
+https://www.720yuntu.com/tour/82cb75846b7ea647
+https://www.720yuntu.com/tour/876e56855904639e
+https://www.720yuntu.com/tour/bb9378d72fe75e37
+https://www.720yuntu.com/tour/a721d53c99ff0eb0
+https://www.720yuntu.com/tour/ddd20b88fc712e0d
+https://www.720yuntu.com/tour/d2d2409909b4662c
+https://www.720yuntu.com/tour/ae43c68e2a01f165
+https://www.720yuntu.com/tour/8463ed4861c23c19
+https://www.720yuntu.com/tour/6912d8b0ca04c9dc
+https://www.720yuntu.com/tour/d93697307927b025
+https://www.720yuntu.com/tour/c1893ee9372cfc1b
+https://www.720yuntu.com/tour/82c9dd8a10ab2122
+https://www.720yuntu.com/tour/8d8e8dbb04c27217
+https://www.720yuntu.com/tour/a6957825eb561054
+https://www.720yuntu.com/tour/4dafd56f033431ee
+https://www.720yuntu.com/tour/410f7f4ba844a1f5
+https://www.720yuntu.com/tour/168f7405a0d565aa
+https://www.720yuntu.com/tour/f96d18c8dbf5e109
+https://www.720yuntu.com/tour/53f6db38e266f409
+https://www.720yuntu.com/tour/7d7aabb3761c7d66
+https://www.720yuntu.com/tour/b78960d472d69636
+https://www.720yuntu.com/tour/37a84bec7acef3c2
+https://www.720yuntu.com/tour/520d136c154a5375
+https://www.720yuntu.com/tour/6b3c2b5aeb83972d
+https://www.720yuntu.com/tour/c271660e02c2e1da
+https://www.720yuntu.com/tour/ac0f66a1921ccd7a
+https://www.720yuntu.com/author?pk=131390
+https://www.720yuntu.com/tour/572c07beaef237df
+https://www.720yuntu.com/tour/cec1599cc27a3b4d
+https://www.720yuntu.com/tour/7b0350b03b4b4661
+https://www.720yuntu.com/tour/5dbacfcef9c1cd26
+https://www.720yuntu.com/tour/a311f8b9bf00e24d
+https://www.720yuntu.com/tour/a1ddd3b99b71d885
+https://www.720yuntu.com/tour/5d98a771797bd726
+https://www.720yuntu.com/tour/aa3c037be0600ba0
+https://www.720yuntu.com/tour/0e4eeff1cc4d3a74
+https://www.720yuntu.com/tour/c2327c3d93708e98
+https://www.720yuntu.com/tour/007a2fb412be7f23
+https://www.720yuntu.com/tour/dfc8633ca6e9aaf8
+https://www.720yuntu.com/tour/261b8ab65621aaf7
+https://www.720yuntu.com/tour/1a2f78f4eb9dddd6
+https://www.720yuntu.com/tour/8f5b51bed5b72b8c
+https://www.720yuntu.com/tour/5abe47de9de01089
+https://www.720yuntu.com/tour/7bd43b50a8e83c4f
+https://www.720yuntu.com/tour/44fea15f5b6ee380
+https://www.720yuntu.com/tour/a6149208478ae5ae
+https://www.720yuntu.com/tour/a5d13d4ef1d9fc9d
+https://www.720yuntu.com/tour/0bed698e8c453098
+https://www.720yuntu.com/tour/962ad5cd5e6bbec4
+https://www.720yuntu.com/tour/1b426aeaabb2d9fd
+https://www.720yuntu.com/tour/c7ec7528b35239b3
+https://www.720yuntu.com/tour/6331ee065e5c0cd7
+https://www.720yuntu.com/tour/265c0473d3ebfed3
+https://www.720yuntu.com/tour/c18a5ec6770b78e6
+https://www.720yuntu.com/author?pk=131392
+https://www.720yuntu.com/author?pk=131391
+https://www.720yuntu.com/tour/29edb056d14650de
+https://www.720yuntu.com/tour/54d74f8d3e575f85
+https://www.720yuntu.com/tour/941687fcfed4b745
+https://www.720yuntu.com/tour/dfe35c8e62292eda
+https://www.720yuntu.com/tour/847b4c3f7cdc31e7
+https://www.720yuntu.com/tour/0771b4d4710d3409
+https://www.720yuntu.com/tour/8c7a1b05129022e3
+https://www.720yuntu.com/tour/eeb3e8cdcf212e08
+https://www.720yuntu.com/tour/99b9186c3f04e2c6
+https://www.720yuntu.com/tour/529241e95ef40a65
+https://www.720yuntu.com/tour/511af88311ad60c1
+https://www.720yuntu.com/tour/6741e722c8643730
+https://www.720yuntu.com/tour/51e0fdc7536a1a97
+https://www.720yuntu.com/tour/f9d82598f6beae06
+https://www.720yuntu.com/tour/b35b4086b8408627
+https://www.720yuntu.com/tour/8d564010146a3f77
+https://www.720yuntu.com/tour/7e65596d018ac174
+https://www.720yuntu.com/tour/42c598c77beb3c7a
+https://www.720yuntu.com/tour/48a6cee6ff637731
+https://www.720yuntu.com/tour/005a6dbd849dd954
+https://www.720yuntu.com/tour/5986a38ee12fd182
+https://www.720yuntu.com/tour/425d8a39437cf980
+https://www.720yuntu.com/tour/3d84834e65534db2
+https://www.720yuntu.com/tour/b040f4bc08699876
+https://www.720yuntu.com/tour/06d5492d81306a35
+https://www.720yuntu.com/author?pk=131393
+https://www.720yuntu.com/tour/0b83fb35ea4acae4
+https://www.720yuntu.com/tour/570bae3e88a3e395
+https://www.720yuntu.com/tour/0a8172b9e5ad0a66
+https://www.720yuntu.com/tour/a130c3bf15295e8d
+https://www.720yuntu.com/tour/c366c934aca12262
+https://www.720yuntu.com/tour/bdd0f0a6fd919d20
+https://www.720yuntu.com/tour/aa632d208b86c9bc
+https://www.720yuntu.com/tour/120781ea2030b57d
+https://www.720yuntu.com/tour/51c0403ff836b63d
+https://www.720yuntu.com/tour/ca21ab72b2e500aa
+https://www.720yuntu.com/tour/c31425ff89264a20
+https://www.720yuntu.com/tour/fc03b6a12ad33648
+https://www.720yuntu.com/tour/58b9483b5d084b43
+https://www.720yuntu.com/tour/904d8018c92b268f
+https://www.720yuntu.com/tour/0c7bdaab4ac37cfa
+https://www.720yuntu.com/tour/5affab70a1d94ed0
+https://www.720yuntu.com/tour/047cf338933e4205
+https://www.720yuntu.com/tour/a0ddc678c240f190
+https://www.720yuntu.com/tour/1587d4fee838d331
+https://www.720yuntu.com/tour/1eaaef4ade14aaf8
+https://www.720yuntu.com/tour/b190daf362e7b129
+https://www.720yuntu.com/tour/b3d7ffaf8b275329
+https://www.720yuntu.com/tour/e77555d54830d0fe
+https://www.720yuntu.com/tour/de1a58abc7b52145
+https://www.720yuntu.com/tour/0b59a036a5a33124
+https://www.720yuntu.com/tour/6169088b81857f18
+https://www.720yuntu.com/tour/e4aa552e47bfa2d8
+https://www.720yuntu.com/tour/0f26357485a348c3
+https://www.720yuntu.com/tour/c393f5f77aa6f437
+https://www.720yuntu.com/tour/427116599bcf9c9b
+https://www.720yuntu.com/tour/f9dac75914cac3d1
+https://www.720yuntu.com/tour/c96ab9638248748d
+https://www.720yuntu.com/tour/c8d297e3966a558a
+https://www.720yuntu.com/tour/d12131b740fde239
+https://www.720yuntu.com/tour/4cfe8d113f130c59
+https://www.720yuntu.com/tour/45b4139060f091e4
+https://www.720yuntu.com/tour/2de1d6b186440b7f
+https://www.720yuntu.com/tour/f2256f2388b43776
+https://www.720yuntu.com/tour/003ceffa3212ed7d
+https://www.720yuntu.com/tour/e7c9b8c60ca22c4a
+https://www.720yuntu.com/tour/a40160fcc2a9c14a
+https://www.720yuntu.com/tour/73f81d3600363d66
+https://www.720yuntu.com/tour/19b90db7bf391689
+https://www.720yuntu.com/tour/b6e922cf4c5981f9
+https://www.720yuntu.com/tour/77558d69cb623a5d
+https://www.720yuntu.com/tour/f44acb1d0c39d838
+https://www.720yuntu.com/tour/adb5eeabb01c9406
+https://www.720yuntu.com/tour/05226e92a7cbe6cd
+https://www.720yuntu.com/tour/480668ea24210fdc
+https://www.720yuntu.com/tour/95a926b738e34913
+https://www.720yuntu.com/tour/2b6e3b28511be52c
+https://www.720yuntu.com/author?pk=131424
+https://www.720yuntu.com/tour/206faa9883cb3d3a
+https://www.720yuntu.com/tour/d36ee6c479e63857
+https://www.720yuntu.com/tour/f1119e771a00917e
+https://www.720yuntu.com/tour/a8f4f5551474b01f
+https://www.720yuntu.com/tour/c8b69776e481eed7
+https://www.720yuntu.com/tour/e617e2b05b7643df
+https://www.720yuntu.com/tour/5ea715b90396f2fc
+https://www.720yuntu.com/tour/d9ddcf30ca9a98fe
+https://www.720yuntu.com/tour/d9ddcf30ca9a98fe
+https://www.720yuntu.com/tour/b27d8b7c3d20342c
+https://www.720yuntu.com/tour/b618c932b1a934b2
+https://www.720yuntu.com/tour/e3c5368fdf5fd52f
+https://www.720yuntu.com/tour/97db95eef8db9a3f
+https://www.720yuntu.com/tour/27d6bcf14f23a584
+https://www.720yuntu.com/tour/e4209172028b6670
+https://www.720yuntu.com/tour/dfabca6627223341
+https://www.720yuntu.com/tour/7622850810f3478e
+https://www.720yuntu.com/tour/641a8e3e3d65bf0b
+https://www.720yuntu.com/tour/5ebebdbfe56c8390
+https://www.720yuntu.com/tour/9ac30e4aa6ff3354
+https://www.720yuntu.com/tour/d3059ea6c8c2ceff
+https://www.720yuntu.com/tour/90f4d41979fc9e0c
+https://www.720yuntu.com/tour/f28b6f8080173c87
+https://www.720yuntu.com/tour/a8db589fae773e0d
+https://www.720yuntu.com/tour/75990892c05bb12e
+https://www.720yuntu.com/tour/4ed05f6ccbad7dc7
+https://www.720yuntu.com/tour/3d3ccb8661fce000
+https://www.720yuntu.com/tour/31c84f83ac1a9c65
+https://www.720yuntu.com/tour/f4677f7fc2f11b9f
+https://www.720yuntu.com/tour/1037c4ef87b44379
+https://www.720yuntu.com/tour/6feb7b7e71355827
+https://www.720yuntu.com/tour/24438381b3407478
+https://www.720yuntu.com/tour/c9f68cb779cf90a0
+https://www.720yuntu.com/tour/aaa1b3eaacfa833d
+https://www.720yuntu.com/tour/e17aaf2838b0a11f
+https://www.720yuntu.com/tour/e17aaf2838b0a11f
+https://www.720yuntu.com/tour/7d8cab4aff47fc49
+https://www.720yuntu.com/tour/f6c42df934e57725
+https://www.720yuntu.com/tour/7f89fa5957ee4516
+https://www.720yuntu.com/tour/823f31ace1d03d36
+https://www.720yuntu.com/tour/d0fe234824a16be7
+https://www.720yuntu.com/tour/9f46cfed94cdcfa7
+https://www.720yuntu.com/tour/ae573749527ed261
+https://www.720yuntu.com/tour/30c54cea26932af6
+https://www.720yuntu.com/tour/bbb6ebd9e5adecf4
+https://www.720yuntu.com/tour/4b4a6879d2e90592
+https://www.720yuntu.com/tour/c31e8c1bd32d7cd8
+https://www.720yuntu.com/tour/2ab71c186061070c
+https://www.720yuntu.com/tour/de2cc2bda7abd495
+https://www.720yuntu.com/tour/a375df5d440c0ba0
+https://www.720yuntu.com/tour/32f28ddf5919deb8
+https://www.720yuntu.com/tour/be44a3a22ede8124
+https://www.720yuntu.com/tour/e59df3a88dae6704
+https://www.720yuntu.com/tour/e6519faf34756b9d
+https://www.720yuntu.com/tour/2c97c5feea18b354
+https://www.720yuntu.com/tour/841c03eef4b149d2
+https://www.720yuntu.com/tour/9a5946f2450920c6
+https://www.720yuntu.com/tour/d72be79a94bbbfaa
+https://www.720yuntu.com/tour/a380dfb102e4393c
+https://www.720yuntu.com/tour/715998943fed97ea
+https://www.720yuntu.com/tour/050c8424c989f67a
+https://www.720yuntu.com/tour/7ce64179f71f95b9
+https://www.720yuntu.com/tour/7a4d6085eeb53555
+https://www.720yuntu.com/tour/d913930531950bec
+https://www.720yuntu.com/tour/7fc48b55af73752d
+https://www.720yuntu.com/tour/b8f97a27c5588180
+https://www.720yuntu.com/tour/8d2135a522e4a952
+https://www.720yuntu.com/tour/6997ec4c39b3c301
+https://www.720yuntu.com/tour/a3074c71dfe6f389
+https://www.720yuntu.com/tour/5d8ef80f9d1ede73
+https://www.720yuntu.com/tour/875beee8295df399
+https://www.720yuntu.com/tour/f3b8ec84a0087ff6
+https://www.720yuntu.com/tour/de627fe56d3f7558
+https://www.720yuntu.com/tour/3e2b988524685f0a
+https://www.720yuntu.com/tour/5e66a5e01c712a6a
+https://www.720yuntu.com/tour/7193d5486b0b2e1e
+https://www.720yuntu.com/tour/ee4b80676c987dd0
+https://www.720yuntu.com/tour/5c4e3734f0b5987c
+https://www.720yuntu.com/tour/e8177beb6e912b89
+https://www.720yuntu.com/tour/a307a996d11df968
+https://www.720yuntu.com/tour/91f2c06991c90f7d
+https://www.720yuntu.com/tour/7e70cc7e5f20e821
+https://www.720yuntu.com/tour/3e74648b269396f9
+https://www.720yuntu.com/tour/3c30d496fb2fb2fc
+https://www.720yuntu.com/tour/0f65f607809b5a23
+https://www.720yuntu.com/tour/7def11a604e3db34
+https://www.720yuntu.com/tour/b030ceed0f75598b
+https://www.720yuntu.com/tour/d61762e61ef9a372
+https://www.720yuntu.com/tour/ef6e07fb1c6e1310
+https://www.720yuntu.com/tour/96f1258f3d6e1eec
+https://www.720yuntu.com/tour/43244c323e7d74b5
+https://www.720yuntu.com/tour/9e3e6e36f65c0f44
+https://www.720yuntu.com/tour/9e54ebe85379840c
+https://www.720yuntu.com/tour/daf94e07e006fb78
+https://www.720yuntu.com/tour/be357e3b35894f9e
+https://www.720yuntu.com/tour/e59b59d8621574b9
+https://www.720yuntu.com/tour/330797e668ae93e9
+https://www.720yuntu.com/tour/33f4e90611a47534
+https://www.720yuntu.com/tour/105d1330cf470d52
+https://www.720yuntu.com/tour/e752bc7b53a2afe6
+https://www.720yuntu.com/tour/ab11bc4af6e8076e
+https://www.720yuntu.com/tour/68db277b6a487b44
+https://www.720yuntu.com/tour/d4a3bc4c40c1bf7a
+https://www.720yuntu.com/tour/3ac2d3f77714666c
+https://www.720yuntu.com/tour/a0801093333ad373
+https://www.720yuntu.com/tour/6caefb5b30fbd233
+https://www.720yuntu.com/tour/8337edb1b3d788ec
+https://www.720yuntu.com/tour/bb41f6b0caf01193
+https://www.720yuntu.com/tour/473f007b7eb50347
+https://www.720yuntu.com/tour/35d24d6cc9a74115
+https://www.720yuntu.com/tour/642b4f84736c5fb4
+https://www.720yuntu.com/tour/65dd6e633b995b62
+https://www.720yuntu.com/tour/c28f627a20c09253
+https://www.720yuntu.com/tour/9fcb0303e8942742
+https://www.720yuntu.com/tour/9fcb0303e8942742
+https://www.720yuntu.com/tour/0c761b4a84c56617
+https://www.720yuntu.com/tour/dd7c742204f8e0da
+https://www.720yuntu.com/tour/80d862070b5a8210
+https://www.720yuntu.com/tour/82f254606c9e47ed
+https://www.720yuntu.com/tour/d4cd04b601878804
+https://www.720yuntu.com/tour/fd1b54d021b49666
+https://www.720yuntu.com/tour/c7b44ccbe8672622
+https://www.720yuntu.com/tour/98fd8c4a225e3eb9
+https://www.720yuntu.com/tour/ff7e415a7d03679f
+https://www.720yuntu.com/tour/65286b21087f8286
+https://www.720yuntu.com/tour/cc9bebaa3f00ff59
+https://www.720yuntu.com/tour/1c74249b5dd6661c
+https://www.720yuntu.com/tour/13050e4490b7e1e2
+https://www.720yuntu.com/tour/61c6e78b9ff0990f
+https://www.720yuntu.com/tour/9b03de68892d3efd
+https://www.720yuntu.com/tour/9268f63b355ff1f7
+https://www.720yuntu.com/tour/e559d81bd36d5d60
+https://www.720yuntu.com/tour/065c167fb08c7e70
+https://www.720yuntu.com/tour/652ab8dbb032ed95
+https://www.720yuntu.com/tour/022e90542d629b52
+https://www.720yuntu.com/tour/2f89d9b20da39e4d
+https://www.720yuntu.com/tour/acecf854f02a2549
+https://www.720yuntu.com/tour/298ee8eb808335c2
+https://www.720yuntu.com/tour/0d981bbea48197c7
+https://www.720yuntu.com/tour/a4dccc615461568a
+https://www.720yuntu.com/tour/0c7771f10ce69d83
+https://www.720yuntu.com/tour/e07781024dd32ec2
+https://www.720yuntu.com/tour/0d34eefda6a3961d
+https://www.720yuntu.com/tour/75f45ce9c904aee1
+https://www.720yuntu.com/tour/4dc4bfb1e153228e
+https://www.720yuntu.com/tour/3ab81ff5ed9839e5
+https://www.720yuntu.com/tour/66b8e6f0b8d265f5
+https://www.720yuntu.com/tour/aaffe030c91c5aea
+https://www.720yuntu.com/tour/cc7694f8e5a83f6b
+https://www.720yuntu.com/tour/541c0f608fe73f6f
+https://www.720yuntu.com/tour/973b686d5b428ed6
+https://www.720yuntu.com/tour/b276b6efe506d781
+https://www.720yuntu.com/tour/23a313c4ee9f75b9
+https://www.720yuntu.com/tour/445f95ce9241d4c4
+https://www.720yuntu.com/tour/13e81090f467ed92
+https://www.720yuntu.com/tour/ef34c30f4199725e
+https://www.720yuntu.com/tour/c0517a845f5abad1
+https://www.720yuntu.com/tour/e20029ba72f65913
+https://www.lediaocha.com/r/yp1195
+https://www.lediaocha.com/r/7pee2w
+https://www.lediaocha.com/r/qoww80
+https://www.lediaocha.com/r/0ngg04
+https://www.lediaocha.com/r/wwkkon
+https://www.lediaocha.com/r/0ngg00
+https://www.lediaocha.com/r/wwkkov
+https://www.lediaocha.com/r/66qqlv
+https://www.lediaocha.com/r/ln44gk
+https://www.lediaocha.com/r/kg888g
+https://www.lediaocha.com/r/1p111g
+https://www.lediaocha.com/r/r6ooo1
+https://www.lediaocha.com/r/8vpppe
+https://www.lediaocha.com/r/e8kkko
+https://www.lediaocha.com/r/yp111k
+https://www.lediaocha.com/r/7peeez
+https://www.lediaocha.com/r/qowwwn
+https://www.lediaocha.com/r/0nggg0
+https://www.lediaocha.com/r/wwkkkv
+https://www.lediaocha.com/r/66qqqv
+https://www.lediaocha.com/r/ln444k
+https://www.lediaocha.com/r/kg88pg
+https://www.lediaocha.com/r/1p11ng
+https://www.lediaocha.com/r/r6ool1
+https://www.lediaocha.com/r/8vpp9e
+https://www.lediaocha.com/r/e8kk5o
+https://www.lediaocha.com/r/yp11zk
+https://www.lediaocha.com/r/7pee6z
+https://www.lediaocha.com/r/qoww9n
+https://www.lediaocha.com/r/0ngge0
+https://www.lediaocha.com/r/wwkkvv
+https://www.lediaocha.com/r/66qqov
+https://www.lediaocha.com/r/ln440k
+https://www.lediaocha.com/r/kg88yg
+https://www.lediaocha.com/r/1p110g
+https://www.lediaocha.com/r/r6oo91
+https://www.lediaocha.com/r/8vpp2e
+https://www.lediaocha.com/r/e8kkro
+https://www.lediaocha.com/r/yp11rk
+https://www.lediaocha.com/r/7peelz
+https://www.lediaocha.com/r/qoww6n
+https://www.lediaocha.com/r/0nggp0
+https://www.lediaocha.com/r/wwkk1v
+https://www.lediaocha.com/r/66qq9v
+https://www.lediaocha.com/r/ln44pk
+https://www.lediaocha.com/r/kg88mg
+https://www.lediaocha.com/r/1p11lg
+https://www.lediaocha.com/r/r6ook1
+https://www.lediaocha.com/r/8vppze
+https://www.lediaocha.com/r/e8kkeo
+https://www.lediaocha.com/r/yp114k
+https://www.lediaocha.com/r/7peerz
+https://www.lediaocha.com/r/qoww2n
+https://www.lediaocha.com/r/0ngg90
+https://www.lediaocha.com/r/wwkkzv
+https://www.lediaocha.com/r/0ngg99
+https://www.lediaocha.com/r/wwkkz2
+https://www.lediaocha.com/r/66qqk6
+https://www.lediaocha.com/r/ln44y6
+https://www.lediaocha.com/r/kg88n2
+https://www.lediaocha.com/r/1p11ox
+https://www.lediaocha.com/r/r6oow2
+https://www.lediaocha.com/r/8vpp1g
+https://www.lediaocha.com/r/e8kkv0
+https://www.lediaocha.com/r/yp11gn
+https://www.lediaocha.com/r/7peeg2
+https://www.lediaocha.com/r/qowwm9
+https://www.lediaocha.com/r/0nggw9
+https://www.lediaocha.com/r/wwkkq2
+https://www.lediaocha.com/r/66qq46
+https://www.lediaocha.com/r/ln44k6
+https://www.lediaocha.com/r/kg88l2
+https://www.lediaocha.com/r/1p119x
+https://www.lediaocha.com/r/r6oo72
+https://www.lediaocha.com/r/8vpp5g
+https://www.lediaocha.com/r/e8kkn0
+https://www.lediaocha.com/r/yp11vn
+https://www.lediaocha.com/r/7peen2
+https://www.lediaocha.com/r/qowwy9
+https://www.lediaocha.com/r/0nggo9
+https://www.lediaocha.com/r/wwkk22
+https://www.lediaocha.com/r/66qo16
+https://www.lediaocha.com/r/ln4076
+https://www.lediaocha.com/r/kg8p72
+https://www.lediaocha.com/r/1p1n7x
+https://www.lediaocha.com/r/r6olx2
+https://www.lediaocha.com/r/8vp90g
+https://www.lediaocha.com/r/e8k520
+https://www.lediaocha.com/r/yp1z6n
+https://www.lediaocha.com/r/7pe682
+https://www.lediaocha.com/r/qow9x9
+https://www.lediaocha.com/r/0ngel9
+https://www.lediaocha.com/r/wwkvr2
+https://www.lediaocha.com/r/66qo66
+https://www.lediaocha.com/r/ln40n6
+https://www.lediaocha.com/r/kg8pg2
+https://www.lediaocha.com/r/1p1npx
+https://www.lediaocha.com/r/r6ol62
+https://www.lediaocha.com/r/8vp9vg
+https://www.lediaocha.com/r/e8k580
+https://www.lediaocha.com/r/yp1zpn
+https://www.lediaocha.com/r/7pe6p2
+https://www.lediaocha.com/r/qow9o9
+https://www.lediaocha.com/r/0ngen9
+https://www.lediaocha.com/r/wwkvw2
+https://www.lediaocha.com/r/0nge7n
+https://www.lediaocha.com/r/wwkvyp
+https://www.lediaocha.com/r/66qo8e
+https://www.lediaocha.com/r/ln409v
+https://www.lediaocha.com/r/kg8po0
+https://www.lediaocha.com/r/1p1n2w
+https://www.lediaocha.com/r/r6ol80
+https://vk.ru/topic-233021751_69529164
+https://vk.ru/topic-233021751_69529165
+https://vk.ru/topic-233021751_69529166
+https://vk.ru/topic-233021751_69529168
+https://vk.ru/topic-233021751_69529177
+https://vk.ru/topic-233021751_69529179
+https://vk.ru/topic-233021751_69529185
+https://vk.ru/topic-233021751_69529186
+https://vk.ru/topic-233021751_69529188
+https://vk.ru/topic-233021751_69529189
+https://vk.ru/topic-233021751_69529195
+https://vk.ru/topic-233021751_69529198
+https://vk.ru/topic-233021751_69529200
+https://vk.ru/topic-233021751_69529202
+https://vk.ru/topic-233021751_69529204
+https://vk.ru/topic-233021751_69529212
+https://vk.ru/topic-233021751_69529213
+https://vk.ru/topic-233021751_69529214
+https://vk.ru/topic-233021751_69529215
+https://vk.ru/topic-233021751_69529216
+https://vk.ru/topic-233021751_69529224
+https://vk.ru/topic-233021751_69529225
+https://vk.ru/topic-233021751_69529226
+https://vk.ru/topic-233021751_69529228
+https://vk.ru/topic-233021751_69529229
+https://vk.ru/topic-233021751_69529230
+https://vk.ru/topic-233021751_69529231
+https://vk.ru/topic-233021751_69529232
+https://vk.ru/topic-233021751_69529233
+https://vk.ru/topic-233021751_69529234
+https://vk.ru/topic-233021751_69529235
+https://vk.ru/topic-233021751_69529236
+https://vk.ru/topic-233021751_69529237
+https://vk.ru/topic-233021751_69529238
+https://vk.ru/topic-233021751_69529239
+https://vk.ru/topic-233021751_69529241
+https://vk.ru/topic-233021751_69529244
+https://vk.ru/topic-233021751_69529246
+https://vk.ru/topic-233021751_69529248
+https://vk.ru/topic-233021751_69529249
+https://vk.ru/topic-233021751_69529250
+https://vk.ru/topic-233021751_69529251
+https://vk.ru/topic-233021751_69529252
+https://vk.ru/topic-233021751_69529253
+https://vk.ru/topic-233021751_69529255
+https://vk.ru/topic-233021751_69529256
+https://vk.ru/topic-233021751_69529257
+https://vk.ru/topic-233021751_69529258
+https://vk.ru/topic-233021751_69529259
+https://vk.ru/topic-233021751_69529260
+https://vk.ru/topic-233021751_69529261
+https://vk.ru/topic-233021751_69529264
+https://vk.ru/topic-233021751_69529266
+https://vk.ru/topic-233021751_69529272
+https://vk.ru/topic-233021751_69529274
+https://vk.ru/topic-233021751_69529276
+https://vk.ru/topic-233021751_69529278
+https://vk.ru/topic-233021751_69529284
+https://vk.ru/topic-233021751_69529289
+https://vk.ru/topic-233021751_69529291
+https://vk.ru/topic-233021751_69529300
+https://vk.ru/topic-233021751_69529303
+https://vk.ru/topic-233021751_69529304
+https://vk.ru/topic-233021751_69529306
+https://vk.ru/topic-233021751_69529313
+https://vk.ru/topic-233021751_69529316
+https://vk.ru/topic-233021751_69529318
+https://vk.ru/topic-233021751_69529323
+https://vk.ru/topic-233021751_69529325
+https://vk.ru/topic-233021751_69529327
+https://vk.ru/topic-233021751_69529330
+https://vk.ru/topic-233021751_69529332
+https://vk.ru/topic-233021751_69529333
+https://vk.ru/topic-233021751_69529334
+https://vk.ru/topic-233021751_69529335
+https://vk.ru/topic-233021751_69529337
+https://vk.ru/topic-233021751_69529339
+https://vk.ru/topic-233021751_69529342
+https://vk.ru/topic-233021751_69529344
+https://vk.ru/topic-233021751_69529345
+https://vk.ru/topic-233021751_69529347
+https://vk.ru/topic-233021751_69529351
+https://vk.ru/topic-233021751_69529353
+https://vk.ru/topic-233021751_69529354
+https://vk.ru/topic-233021751_69529356
+https://vk.ru/topic-233021751_69529357
+https://vk.ru/topic-233021751_69529359
+https://vk.ru/topic-233021751_69529360
+https://vk.ru/topic-233021751_69529362
+https://vk.ru/topic-233021751_69529364
+https://vk.ru/topic-233021751_69529368
+https://vk.ru/topic-233021751_69529376
+https://vk.ru/topic-233021751_69529378
+https://vk.ru/topic-233021751_69529381
+https://vk.ru/topic-233021751_69529383
+https://vk.ru/topic-233021751_69529385
+https://vk.ru/topic-233021751_69529386
+https://vk.ru/topic-233021751_69529388
+https://vk.ru/topic-233021751_69529389
+https://vk.ru/topic-233021751_69529390
+https://vk.ru/topic-233021751_69529393
+https://vk.ru/topic-233021751_69529398
+https://vk.ru/topic-233021751_69529404
+https://vk.ru/topic-233021751_69529405
+https://vk.ru/topic-233021751_69529414
+https://vk.ru/topic-233021751_69529416
+https://vk.ru/topic-233021751_69529417
+https://vk.ru/topic-233021751_69529425
+https://vk.ru/topic-233021751_69529429
+https://pastebin.com/zd7LWPYq
+https://pastebin.com/TpaX7ATB
+https://pastebin.com/k3MbrmM3
+https://pastebin.com/E8cMZn9c
+https://pastebin.com/uQKXmMbL
+https://pastebin.com/YAfsYXpi
+https://pastebin.com/ifSF2XtP
+https://pastebin.com/66c4NNhw
+https://pastebin.com/7NUzqkRt
+https://pastebin.com/Rgk0r3AQ
+https://pastebin.com/AiTTQvH2
+https://pastebin.com/t5q1nxWy
+https://pastebin.com/P6kkpH5p
+https://pastebin.com/7gHwxjF4
+https://pastebin.com/aGK2e3mc
+https://pastebin.com/069ve3X2
+https://pastebin.com/JjN8EchA
+https://pastebin.com/Z76SU9fr
+https://pastebin.com/hEFqN9em
+https://pastebin.com/hEWqZUnF
